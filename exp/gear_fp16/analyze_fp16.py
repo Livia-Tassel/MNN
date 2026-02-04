@@ -152,6 +152,22 @@ def build_layer_rows(args) -> Tuple[list, list]:
         print(f"No meta_*.json found under {args.dump_dir}", file=sys.stderr)
         return rows, head_rows
 
+    run_prompt_tokens = {}
+    if args.run_log:
+        try:
+            with open(args.run_log, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    run_id = obj.get("run_id")
+                    prompt_tokens = obj.get("metrics", {}).get("prompt_tokens")
+                    if run_id and prompt_tokens is not None:
+                        run_prompt_tokens[run_id] = int(prompt_tokens)
+        except Exception as exc:
+            print(f"Failed to read run log: {exc}", file=sys.stderr)
+
     for meta_path in meta_files:
         meta = load_json(meta_path)
         stage = meta.get("stage", "unknown")
@@ -212,6 +228,8 @@ def build_layer_rows(args) -> Tuple[list, list]:
             k_fp32 = fp32_split16_metrics(k_bytes, seq_len, kv_heads, head_dim, args.zstd_level)
             v_fp32 = fp32_split16_metrics(v_bytes, seq_len, kv_heads, head_dim, args.zstd_level)
 
+        run_id = meta.get("run_id")
+        prompt_tokens = run_prompt_tokens.get(run_id)
         row = {
             "layer_id": meta.get("layer_id"),
             "stage": stage,
@@ -220,6 +238,8 @@ def build_layer_rows(args) -> Tuple[list, list]:
             "kv_heads": kv_heads,
             "head_dim": head_dim,
             "bytes_per_elem": bytes_per_elem,
+            "run_id": run_id,
+            "prompt_tokens": prompt_tokens,
             "k_entropy": k_entropy,
             "v_entropy": v_entropy,
             "k_zstd_ratio": k_zstd,
@@ -340,9 +360,60 @@ def write_csv(path: str, rows: list) -> None:
         writer.writerows(rows)
 
 
+def write_grouped_summary(path: str, rows: list, bins: list) -> None:
+    def weighted_ratio(rows_subset: list, key: str) -> float:
+        total_raw = 0.0
+        total_comp = 0.0
+        for r in rows_subset:
+            ratio = r.get(key, 0.0)
+            if ratio is None or ratio <= 0.0:
+                continue
+            raw = float(r["seq_len"]) * float(r["kv_heads"]) * float(r["head_dim"]) * float(r["bytes_per_elem"])
+            total_raw += raw
+            total_comp += raw / float(ratio)
+        return total_raw / total_comp if total_comp > 0 else 0.0
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Grouped Summary by Prompt Tokens\n\n")
+        for label, lo, hi in bins:
+            subset = []
+            for r in rows:
+                pt = r.get("prompt_tokens")
+                if pt is None:
+                    continue
+                if pt < lo:
+                    continue
+                if hi is not None and pt > hi:
+                    continue
+                subset.append(r)
+            if not subset:
+                continue
+            f.write(f"## {label}\n")
+            f.write(f"- Dumps: {len(subset)}\n")
+            f.write(f"- Weighted K zstd: {weighted_ratio(subset, 'k_zstd_ratio'):.3f}\n")
+            f.write(f"- Weighted V zstd: {weighted_ratio(subset, 'v_zstd_ratio'):.3f}\n")
+            f.write(f"- Weighted K gear: {weighted_ratio(subset, 'k_gear_ratio'):.3f}\n")
+            f.write(f"- Weighted V gear: {weighted_ratio(subset, 'v_gear_ratio'):.3f}\n")
+            f.write(f"- Weighted K gear+delta: {weighted_ratio(subset, 'k_gear_delta_ratio'):.3f}\n")
+            f.write(f"- Weighted V gear+delta: {weighted_ratio(subset, 'v_gear_delta_ratio'):.3f}\n")
+            f.write("\n")
+
+
 def write_summary(path: str, rows: list) -> None:
     if not rows:
         return
+
+    def weighted_ratio(key: str) -> float:
+        total_raw = 0.0
+        total_comp = 0.0
+        for r in rows:
+            ratio = r.get(key, 0.0)
+            if ratio is None or ratio <= 0.0:
+                continue
+            raw = float(r["seq_len"]) * float(r["kv_heads"]) * float(r["head_dim"]) * float(r["bytes_per_elem"])
+            total_raw += raw
+            total_comp += raw / float(ratio)
+        return total_raw / total_comp if total_comp > 0 else 0.0
 
     k_zstd = avg([r["k_zstd_ratio"] for r in rows])
     v_zstd = avg([r["v_zstd_ratio"] for r in rows])
@@ -354,6 +425,17 @@ def write_summary(path: str, rows: list) -> None:
     v_split16 = avg([r["v_split16_ratio"] for r in rows if r["v_split16_ratio"] > 0.0])
     k_split16_delta = avg([r["k_split16_delta_ratio"] for r in rows if r["k_split16_delta_ratio"] > 0.0])
     v_split16_delta = avg([r["v_split16_delta_ratio"] for r in rows if r["v_split16_delta_ratio"] > 0.0])
+
+    k_zstd_w = weighted_ratio("k_zstd_ratio")
+    v_zstd_w = weighted_ratio("v_zstd_ratio")
+    k_gear_w = weighted_ratio("k_gear_ratio")
+    v_gear_w = weighted_ratio("v_gear_ratio")
+    k_gear_delta_w = weighted_ratio("k_gear_delta_ratio")
+    v_gear_delta_w = weighted_ratio("v_gear_delta_ratio")
+    k_split16_w = weighted_ratio("k_split16_ratio")
+    v_split16_w = weighted_ratio("v_split16_ratio")
+    k_split16_delta_w = weighted_ratio("k_split16_delta_ratio")
+    v_split16_delta_w = weighted_ratio("v_split16_delta_ratio")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Gear FP16 Summary\n\n")
@@ -376,6 +458,26 @@ def write_summary(path: str, rows: list) -> None:
             f.write(f"- Avg K split16+delta ratio: {k_split16_delta:.3f}\n")
         if v_split16_delta > 0.0:
             f.write(f"- Avg V split16+delta ratio: {v_split16_delta:.3f}\n")
+        f.write("\n")
+        f.write("## Weighted Ratios (by raw bytes)\n")
+        f.write(f"- Weighted K zstd ratio: {k_zstd_w:.3f}\n")
+        f.write(f"- Weighted V zstd ratio: {v_zstd_w:.3f}\n")
+        if k_gear_w > 0.0:
+            f.write(f"- Weighted K gear ratio: {k_gear_w:.3f}\n")
+        if v_gear_w > 0.0:
+            f.write(f"- Weighted V gear ratio: {v_gear_w:.3f}\n")
+        if k_gear_delta_w > 0.0:
+            f.write(f"- Weighted K gear+delta ratio: {k_gear_delta_w:.3f}\n")
+        if v_gear_delta_w > 0.0:
+            f.write(f"- Weighted V gear+delta ratio: {v_gear_delta_w:.3f}\n")
+        if k_split16_w > 0.0:
+            f.write(f"- Weighted K split16 ratio: {k_split16_w:.3f}\n")
+        if v_split16_w > 0.0:
+            f.write(f"- Weighted V split16 ratio: {v_split16_w:.3f}\n")
+        if k_split16_delta_w > 0.0:
+            f.write(f"- Weighted K split16+delta ratio: {k_split16_delta_w:.3f}\n")
+        if v_split16_delta_w > 0.0:
+            f.write(f"- Weighted V split16+delta ratio: {v_split16_delta_w:.3f}\n")
 
 
 def main() -> int:
@@ -387,6 +489,9 @@ def main() -> int:
     parser.add_argument("--min-seq-len", type=int, default=0, help="Skip entries with seq_len smaller than this.")
     parser.add_argument("--max-seq-len", type=int, default=0, help="Skip entries with seq_len larger than this (0 = no limit).")
     parser.add_argument("--skip-head-metrics", action="store_true", help="Skip per-head metrics for speed.")
+    parser.add_argument("--run-log", default=None, help="llm_demo run log (jsonl) to attach prompt token counts.")
+    parser.add_argument("--group-bins", default="0-256,257-512,513-1024,1025-2048,2049+",
+                        help="Prompt token bins for grouped summary.")
     args = parser.parse_args()
 
     if zstd is None:
@@ -397,6 +502,7 @@ def main() -> int:
     layer_csv = os.path.join(args.out_dir, "layer_metrics.csv")
     head_csv = os.path.join(args.out_dir, "head_metrics.csv")
     summary_path = os.path.join(args.out_dir, "summary.md")
+    grouped_path = os.path.join(args.out_dir, "grouped_summary.md")
 
     rows, head_rows = build_layer_rows(args)
     if not rows:
@@ -407,11 +513,26 @@ def main() -> int:
     if head_rows:
         write_csv(head_csv, head_rows)
     write_summary(summary_path, rows)
+    if args.run_log:
+        bins = []
+        for part in args.group_bins.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if part.endswith("+"):
+                lo = int(part[:-1])
+                bins.append((part, lo, None))
+            else:
+                lo_s, hi_s = part.split("-", 1)
+                bins.append((part, int(lo_s), int(hi_s)))
+        write_grouped_summary(grouped_path, rows, bins)
 
     print(f"Wrote {layer_csv}")
     if head_rows:
         print(f"Wrote {head_csv}")
     print(f"Wrote {summary_path}")
+    if args.run_log:
+        print(f"Wrote {grouped_path}")
     return 0
 
 
