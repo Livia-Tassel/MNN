@@ -48,6 +48,25 @@ Outputs:
 - `exp/gear_fp16/out/head_metrics.csv`
 - `exp/gear_fp16/out/summary.md`
 
+## Step 3: Verify round-trip correctness (gear+delta)
+```bash
+python3 exp/gear_fp16/verify_roundtrip.py \
+  --dump-dir exp/gear_fp16/dumps_fp16 \
+  --stage both \
+  --min-seq-len 0 \
+  --max-seq-len 0
+```
+
+## Step 4: Benchmark encode/decode latency (offline)
+```bash
+python3 exp/gear_fp16/bench_latency.py \
+  --dump-dir exp/gear_fp16/dumps_fp16 \
+  --stage both \
+  --zstd-level 3 \
+  --mode gear-delta \
+  --iters 5
+```
+
 ## Notes
 - This experiment keeps RoPE as-is. The compression target must match real KV cache storage.
 - If you need speed, add `--skip-head-metrics` when running the analyzer.
