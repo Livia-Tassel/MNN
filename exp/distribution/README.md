@@ -30,6 +30,15 @@ python3 exp/distribution/analyze_distribution.py \
   --stage prefill
 ```
 
+**分析 packed 存储布局**
+```bash
+python3 exp/distribution/analyze_packed.py \
+  --dump-dir exp/distribution/dumps \
+  --out-dir exp/distribution/out \
+  --zstd-level 3 \
+  --min-seq-len 128
+```
+
 **可选：RoPE 逆变换对比**
 ```bash
 python3 exp/distribution/analyze_distribution.py \
