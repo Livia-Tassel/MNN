@@ -90,6 +90,25 @@ def inverse_rope_fp16(data: bytes, seq_len: int, kv_heads: int, head_dim: int, r
     return k_f.astype(np.float16).tobytes()
 
 
+def inverse_rope_fp32(data: bytes, seq_len: int, kv_heads: int, head_dim: int, rope_theta: float, rope_dim: int) -> bytes:
+    k = np.frombuffer(data, dtype=np.float32).reshape((seq_len, kv_heads, head_dim))
+    k_f = k.astype(np.float32, copy=True)
+    rotary_dim = min(rope_dim, head_dim)
+    if rotary_dim % 2 != 0:
+        rotary_dim -= 1
+    if rotary_dim <= 0:
+        return k.tobytes()
+    inv_freq = 1.0 / (rope_theta ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / rotary_dim))
+    pos = np.arange(seq_len, dtype=np.float32)
+    angles = np.outer(pos, inv_freq)
+    cos = np.cos(angles)[:, None, :]
+    sin = np.sin(angles)[:, None, :]
+    x1 = k_f[..., 0:rotary_dim:2]
+    x2 = k_f[..., 1:rotary_dim:2]
+    k_f[..., 0:rotary_dim:2] = x1 * cos + x2 * sin
+    k_f[..., 1:rotary_dim:2] = -x1 * sin + x2 * cos
+    return k_f.tobytes()
+
 def iter_meta_files(root: str):
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
@@ -103,6 +122,8 @@ def main() -> int:
     parser.add_argument("--out-dir", default="exp/distribution/out", help="Output directory for csv/summary.")
     parser.add_argument("--zstd-level", type=int, default=3, help="Zstd compression level.")
     parser.add_argument("--stage", choices=["prefill", "decode", "both"], default="both")
+    parser.add_argument("--min-seq-len", type=int, default=0, help="Skip entries with seq_len smaller than this.")
+    parser.add_argument("--max-seq-len", type=int, default=0, help="Skip entries with seq_len larger than this (0 = no limit).")
     parser.add_argument("--rope-config", default=None, help="Path to config.json or llm_config.json for RoPE params.")
     parser.add_argument("--rope-theta", type=float, default=None, help="Override rope_theta.")
     parser.add_argument("--rope-dim", type=int, default=None, help="Override rotary_dim.")
@@ -144,6 +165,10 @@ def main() -> int:
 
         bytes_per_elem = int(meta["bytes_per_elem"])
         seq_len = int(meta["seq_len"])
+        if args.min_seq_len and seq_len < args.min_seq_len:
+            continue
+        if args.max_seq_len and seq_len > args.max_seq_len:
+            continue
         kv_heads = int(meta["kv_heads"])
         head_dim = int(meta["head_dim"])
 
@@ -166,6 +191,11 @@ def main() -> int:
                 k_inv = inverse_rope_fp16(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final)
                 k_rope_inv_zstd = zstd_ratio(k_inv, args.zstd_level)
                 _, _, _, _, k_rope_inv_gear = gear_ratios_fp16(k_inv, args.zstd_level)
+        elif bytes_per_elem == 4:
+            if rope_theta is not None:
+                rope_dim_final = int(rope_dim) if rope_dim is not None else head_dim
+                k_inv = inverse_rope_fp32(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final)
+                k_rope_inv_zstd = zstd_ratio(k_inv, args.zstd_level)
 
         row = {
             "layer_id": meta.get("layer_id"),
