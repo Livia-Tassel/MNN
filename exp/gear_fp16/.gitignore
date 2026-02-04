@@ -3,5 +3,6 @@ dumps/
 dumps_raw/
 dumps_fp16/
 out/
+prompts/
 *.bin
 *.json

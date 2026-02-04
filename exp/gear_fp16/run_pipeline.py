@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--prompt-hf-path", default=None)
     parser.add_argument("--prompt-tolerance", type=float, default=0.05)
     parser.add_argument("--prompt-min-piece-chars", type=int, default=200)
+    parser.add_argument("--prompt-jsonl-format", choices=["auto", "mmlu", "text"], default="auto")
     parser.add_argument("--prompt-strict", action="store_true")
     parser.add_argument("--prompt-overwrite", action="store_true")
     parser.add_argument("--decode-tokens", type=int, default=128, help="Max new tokens for decode.")
@@ -61,6 +62,7 @@ def main() -> int:
             "--tokenizer", args.prompt_tokenizer,
             "--tolerance", str(args.prompt_tolerance),
             "--min-piece-chars", str(args.prompt_min_piece_chars),
+            "--jsonl-format", args.prompt_jsonl_format,
         ]
         if args.corpus:
             cmd += ["--corpus"] + args.corpus

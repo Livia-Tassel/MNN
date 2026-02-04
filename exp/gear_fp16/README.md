@@ -36,6 +36,7 @@ python3 exp/gear_fp16/gen_prompts.py \
 Notes:
 - Tokenizer order in `auto`: `MNN -> HF -> approx`
 - Use `--strict` to forbid fallback
+- JSONL (e.g. MMLU) is supported; add `--jsonl-format mmlu` if needed
 
 ## Step 0 (Recommended): Run llm_demo with real prompts
 Prepare prompt files (real text) under a directory, then:

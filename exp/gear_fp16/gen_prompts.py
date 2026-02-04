@@ -8,18 +8,47 @@ import sys
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 
-def load_text_files(paths: List[str]) -> List[str]:
-    texts = []
-    for path in paths:
-        if os.path.isdir(path):
-            for name in sorted(os.listdir(path)):
-                if name.endswith(".txt"):
-                    with open(os.path.join(path, name), "r", encoding="utf-8", errors="ignore") as f:
-                        texts.append(f.read())
-        else:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                texts.append(f.read())
-    return texts
+def format_mmlu(obj: Dict) -> Optional[str]:
+    question = obj.get("question") or obj.get("prompt") or obj.get("input")
+    choices = obj.get("choices") or obj.get("options")
+    if not question or not choices:
+        return None
+    lines = [f"Q: {str(question).strip()}"]
+    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for i, choice in enumerate(choices):
+        label = labels[i] if i < len(labels) else f"Choice{i+1}"
+        lines.append(f"{label}. {str(choice).strip()}")
+    return "\n".join(lines)
+
+
+def format_generic(obj: Dict) -> Optional[str]:
+    for key in ("text", "prompt", "input", "question"):
+        if key in obj and obj[key]:
+            return str(obj[key]).strip()
+    return None
+
+
+def load_jsonl(path: str, jsonl_format: str) -> List[str]:
+    items = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = None
+            if jsonl_format == "mmlu":
+                text = format_mmlu(obj)
+            elif jsonl_format == "text":
+                text = format_generic(obj)
+            else:
+                text = format_mmlu(obj) or format_generic(obj)
+            if text:
+                items.append(text)
+    return items
 
 
 def split_pieces(text: str, min_chars: int) -> List[str]:
@@ -29,6 +58,26 @@ def split_pieces(text: str, min_chars: int) -> List[str]:
         p = part.strip()
         if len(p) >= min_chars:
             pieces.append(p)
+    return pieces
+
+
+def load_corpus(paths: List[str], min_chars: int, jsonl_format: str) -> List[str]:
+    pieces: List[str] = []
+    for path in paths:
+        if os.path.isdir(path):
+            for name in sorted(os.listdir(path)):
+                full = os.path.join(path, name)
+                if name.endswith(".jsonl") or name.endswith(".json"):
+                    pieces.extend(load_jsonl(full, jsonl_format))
+                elif name.endswith(".txt"):
+                    with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                        pieces.extend(split_pieces(f.read(), min_chars))
+        else:
+            if path.endswith(".jsonl") or path.endswith(".json"):
+                pieces.extend(load_jsonl(path, jsonl_format))
+            else:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    pieces.extend(split_pieces(f.read(), min_chars))
     return pieces
 
 
@@ -125,14 +174,16 @@ def build_prompt(pieces: List[str],
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate prompt files with target token lengths.")
     parser.add_argument("--config", required=True, help="Model config.json path (for tokenizer).")
-    parser.add_argument("--corpus", nargs="+", required=True, help="Text file(s) or directories.")
+    parser.add_argument("--corpus", nargs="+", required=True, help="Text/JSONL file(s) or directories.")
     parser.add_argument("--out-dir", default="exp/gear_fp16/prompts", help="Output directory for prompt files.")
     parser.add_argument("--targets", default="128,512,2048", help="Comma-separated target token lengths.")
     parser.add_argument("--per-target", type=int, default=3, help="Prompts to generate per target.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--min-piece-chars", type=int, default=200)
+    parser.add_argument("--min-piece-chars", type=int, default=200, help="Only applies to plain text files.")
     parser.add_argument("--tolerance", type=float, default=0.05, help="Token count tolerance.")
     parser.add_argument("--tokenizer", choices=["auto", "mnn", "hf", "approx"], default="auto")
+    parser.add_argument("--jsonl-format", choices=["auto", "mmlu", "text"], default="auto",
+                        help="How to parse JSONL rows.")
     parser.add_argument("--hf-path", default=None, help="Optional HF tokenizer directory.")
     parser.add_argument("--strict", action="store_true", help="Fail if tokenizer fallback is needed.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing prompt files.")
@@ -145,14 +196,7 @@ def main() -> int:
 
     count_fn, tokenizer_used = build_token_counter(args.tokenizer, args.config, args.hf_path, args.strict)
 
-    texts = load_text_files(args.corpus)
-    if not texts:
-        print("No corpus text loaded.", file=sys.stderr)
-        return 1
-
-    pieces = []
-    for text in texts:
-        pieces.extend(split_pieces(text, args.min_piece_chars))
+    pieces = load_corpus(args.corpus, args.min_piece_chars, args.jsonl_format)
     if not pieces:
         print("No pieces found. Reduce --min-piece-chars.", file=sys.stderr)
         return 1
