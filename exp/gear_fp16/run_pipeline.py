@@ -3,6 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 
 def run_cmd(cmd, cwd=None):
@@ -32,15 +33,16 @@ def main() -> int:
     parser.add_argument("--decode-tokens", type=int, default=128, help="Max new tokens for decode.")
     parser.add_argument("--dump-dir", default="exp/gear_fp16/dumps_raw", help="KV dump output root dir.")
     parser.add_argument("--fp16-dump-dir", default="exp/gear_fp16/dumps_fp16", help="FP16 dump output dir.")
-    parser.add_argument("--out-dir", default="exp/gear_fp16/out", help="Analysis output dir.")
+    parser.add_argument("--out-dir", default="exp/gear_fp16/out", help="Analysis output root dir.")
     parser.add_argument("--stage", choices=["prefill", "decode", "both"], default="both")
     parser.add_argument("--max-dump-tokens", type=int, default=0, help="Limit dump seq len (0 = no limit).")
     parser.add_argument("--zstd-level", type=int, default=3, help="Zstd compression level.")
     parser.add_argument("--min-seq-len", type=int, default=0)
     parser.add_argument("--max-seq-len", type=int, default=0)
     parser.add_argument("--skip-head-metrics", action="store_true")
+    parser.add_argument("--run-id", default="auto", help="Unique run id (default: timestamp).")
     parser.add_argument("--run-prefix", default="demo", help="Prefix for MNN_KV_DUMP_RUN_ID.")
-    parser.add_argument("--log-file", default="exp/gear_fp16/out/llm_demo_runs.jsonl")
+    parser.add_argument("--log-file", default="", help="Path to llm_demo_runs.jsonl (default: <out-dir>/<run-id>/).")
     parser.add_argument("--skip-demo", action="store_true")
     parser.add_argument("--skip-convert", action="store_true")
     parser.add_argument("--skip-analyze", action="store_true")
@@ -52,11 +54,32 @@ def main() -> int:
     convert = os.path.join(root, "convert_fp16.py")
     analyze = os.path.join(root, "analyze_fp16.py")
 
+    if args.run_id == "auto" or not args.run_id:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        run_id = args.run_id
+
+    prompt_dir_run = args.prompt_dir
+    if args.gen_prompts or args.corpus:
+        prompt_dir_run = os.path.join(args.prompt_dir, run_id)
+
+    out_dir_run = os.path.join(args.out_dir, run_id)
+    os.makedirs(out_dir_run, exist_ok=True)
+
+    log_file_run = args.log_file if args.log_file else os.path.join(out_dir_run, "llm_demo_runs.jsonl")
+    run_prefix_effective = f"{args.run_prefix}_{run_id}" if args.run_prefix else run_id
+
+    print(f"[run_id] {run_id}")
+    print(f"[prompt_dir] {prompt_dir_run}")
+    print(f"[out_dir] {out_dir_run}")
+    print(f"[log_file] {log_file_run}")
+    print(f"[run_prefix] {run_prefix_effective}")
+
     if args.gen_prompts or args.corpus:
         cmd = [
             sys.executable, gen_prompts,
             "--config", args.config,
-            "--out-dir", args.prompt_dir,
+            "--out-dir", prompt_dir_run,
             "--targets", args.prompt_targets,
             "--per-target", str(args.prompt_per_target),
             "--tokenizer", args.prompt_tokenizer,
@@ -80,13 +103,13 @@ def main() -> int:
             "--llm-demo", args.llm_demo,
             "--config", args.config,
             "--dump-dir", args.dump_dir,
-            "--run-prefix", args.run_prefix,
+            "--run-prefix", run_prefix_effective,
             "--stage", args.stage,
             "--decode-tokens", str(args.decode_tokens),
-            "--log-file", args.log_file,
+            "--log-file", log_file_run,
         ]
-        if args.prompt_dir:
-            cmd += ["--prompt-dir", args.prompt_dir]
+        if prompt_dir_run:
+            cmd += ["--prompt-dir", prompt_dir_run]
         if args.prompt_files:
             cmd += ["--prompt-files"] + args.prompt_files
         if args.max_dump_tokens > 0:
@@ -108,14 +131,14 @@ def main() -> int:
         cmd = [
             sys.executable, analyze,
             "--dump-dir", args.fp16_dump_dir,
-            "--out-dir", args.out_dir,
+            "--out-dir", out_dir_run,
             "--stage", args.stage,
             "--zstd-level", str(args.zstd_level),
             "--min-seq-len", str(args.min_seq_len),
             "--max-seq-len", str(args.max_seq_len),
         ]
-        if args.log_file:
-            cmd += ["--run-log", args.log_file]
+        if log_file_run:
+            cmd += ["--run-log", log_file_run]
         if args.skip_head_metrics:
             cmd.append("--skip-head-metrics")
         run_cmd(cmd)

@@ -100,6 +100,8 @@ python3 exp/gear_fp16/run_pipeline.py \
   --stage both \
   --zstd-level 3
 ```
+Each run now writes results under `exp/gear_fp16/out/<run_id>/` and prompts under `exp/gear_fp16/prompts/<run_id>/`.
+You can override the run id via `--run-id`.
 
 ## Step 3: Verify round-trip correctness (gear+delta)
 ```bash
