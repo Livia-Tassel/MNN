@@ -806,6 +806,25 @@ void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int
         }
     } MNN_CONCURRENCY_END();
     mPastLength += seq_len;
+#if defined(MNN_EXP_KV_DUMP)
+    KVExp::DumpPackedKVIfEnabled(this,
+                                 addrOfKey(0),
+                                 addrOfValue(0),
+                                 add,
+                                 mKvNumHead,
+                                 mHeadDim,
+                                 mBytes,
+                                 mPastLength,
+                                 mMaxLength,
+                                 hP,
+                                 lP,
+                                 static_cast<int>(mFlashAttentionUpperKv),
+                                 mCurrentKeySizePerHead,
+                                 mCurrentValueSizePerHead,
+                                 mQuantKey,
+                                 mQuantValue,
+                                 mMeta);
+#endif
 }
 
 } // namespace MNN

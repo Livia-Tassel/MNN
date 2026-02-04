@@ -31,6 +31,7 @@ enum class DumpStage {
 
 struct DumpConfig {
     bool enabled = false;
+    bool dump_packed = false;
     std::string root_dir;
     std::string run_id;
     int max_tokens = 0;
@@ -63,6 +64,13 @@ inline DumpStage ParseStage(const std::string& stage) {
     return DumpStage::Prefill;
 }
 
+inline bool ParseBool(const std::string& value) {
+    if (value == "1" || value == "true" || value == "on" || value == "yes") {
+        return true;
+    }
+    return false;
+}
+
 inline std::string MakeRunId() {
     static std::atomic<uint64_t> counter{0};
     std::ostringstream oss;
@@ -86,6 +94,7 @@ inline DumpConfig& GetConfig() {
         }
         cfg.max_tokens = GetEnvInt("MNN_KV_DUMP_MAX_TOKENS", 0);
         cfg.stage = ParseStage(GetEnvString("MNN_KV_DUMP_STAGE", "prefill"));
+        cfg.dump_packed = ParseBool(GetEnvString("MNN_KV_DUMP_PACKED", "0"));
         return cfg;
     }();
     return config;
@@ -196,6 +205,50 @@ inline void WriteMetaFile(const std::string& path,
     out << "}\n";
 }
 
+inline void WritePackedMetaFile(const std::string& path,
+                                int layer_id,
+                                int used_seq_len,
+                                int max_seq_len,
+                                int kv_heads,
+                                int head_dim,
+                                int bytes_per_elem,
+                                int pack_h,
+                                int pack_l,
+                                int flash_upper_kv,
+                                size_t key_stride_bytes,
+                                size_t value_stride_bytes,
+                                size_t key_used_bytes,
+                                size_t value_used_bytes,
+                                const std::string& stage,
+                                const std::string& run_id,
+                                const std::string& k_file,
+                                const std::string& v_file) {
+    std::ofstream out(path.c_str(), std::ios::out);
+    if (!out) {
+        return;
+    }
+    out << "{\n";
+    out << "  \"layout\": \"packed\",\n";
+    out << "  \"layer_id\": " << layer_id << ",\n";
+    out << "  \"used_seq_len\": " << used_seq_len << ",\n";
+    out << "  \"max_seq_len\": " << max_seq_len << ",\n";
+    out << "  \"kv_heads\": " << kv_heads << ",\n";
+    out << "  \"head_dim\": " << head_dim << ",\n";
+    out << "  \"bytes_per_elem\": " << bytes_per_elem << ",\n";
+    out << "  \"pack_h\": " << pack_h << ",\n";
+    out << "  \"pack_l\": " << pack_l << ",\n";
+    out << "  \"flash_upper_kv\": " << flash_upper_kv << ",\n";
+    out << "  \"key_stride_bytes\": " << key_stride_bytes << ",\n";
+    out << "  \"value_stride_bytes\": " << value_stride_bytes << ",\n";
+    out << "  \"key_used_bytes\": " << key_used_bytes << ",\n";
+    out << "  \"value_used_bytes\": " << value_used_bytes << ",\n";
+    out << "  \"stage\": \"" << stage << "\",\n";
+    out << "  \"run_id\": \"" << run_id << "\",\n";
+    out << "  \"k_file\": \"" << k_file << "\",\n";
+    out << "  \"v_file\": \"" << v_file << "\"\n";
+    out << "}\n";
+}
+
 inline void DumpKVIfEnabled(const void* layer_ptr,
                             const Tensor* key,
                             const Tensor* value,
@@ -293,6 +346,111 @@ inline void DumpKVIfEnabled(const void* layer_ptr,
                   cfg.run_id,
                   k_file,
                   v_file);
+}
+
+inline void DumpPackedKVIfEnabled(const void* layer_ptr,
+                                  const uint8_t* key_addr,
+                                  const uint8_t* value_addr,
+                                  int add,
+                                  int kv_heads,
+                                  int head_dim,
+                                  int bytes_per_elem,
+                                  int past_length,
+                                  int max_length,
+                                  int pack_h,
+                                  int pack_l,
+                                  int flash_upper_kv,
+                                  size_t key_stride_bytes,
+                                  size_t value_stride_bytes,
+                                  bool quant_key,
+                                  bool quant_value,
+                                  const KVMeta* meta) {
+    auto& cfg = GetConfig();
+    if (!cfg.enabled || !cfg.dump_packed) {
+        return;
+    }
+    if (key_addr == nullptr || value_addr == nullptr) {
+        return;
+    }
+    if (add <= 0 || !ShouldDump(cfg.stage, add)) {
+        return;
+    }
+    if (quant_key || quant_value) {
+        return;
+    }
+    if (bytes_per_elem != 2 && bytes_per_elem != 4) {
+        return;
+    }
+    if (kv_heads <= 0 || head_dim <= 0 || past_length <= 0) {
+        return;
+    }
+
+    if (flash_upper_kv <= 0) {
+        flash_upper_kv = max_length > 0 ? max_length : past_length;
+    }
+
+    size_t key_used_bytes_per_head = static_cast<size_t>(ROUND_UP(past_length, pack_h)) *
+                                     static_cast<size_t>(ROUND_UP(head_dim, pack_l)) *
+                                     static_cast<size_t>(bytes_per_elem);
+    size_t value_used_bytes_per_head = static_cast<size_t>(UP_DIV(past_length, flash_upper_kv)) *
+                                       static_cast<size_t>(ROUND_UP(head_dim, pack_h)) *
+                                       static_cast<size_t>(ROUND_UP(flash_upper_kv, pack_l)) *
+                                       static_cast<size_t>(bytes_per_elem);
+    if (key_used_bytes_per_head > key_stride_bytes) {
+        key_used_bytes_per_head = key_stride_bytes;
+    }
+    if (value_used_bytes_per_head > value_stride_bytes) {
+        value_used_bytes_per_head = value_stride_bytes;
+    }
+    size_t total_key_bytes = key_used_bytes_per_head * static_cast<size_t>(kv_heads);
+    size_t total_value_bytes = value_used_bytes_per_head * static_cast<size_t>(kv_heads);
+
+    int layer_id = GetLayerId(layer_ptr, meta ? meta->layer_nums : 0);
+    std::string stage = (add == 1 ? "decode" : "prefill");
+    std::string run_dir = MNNFilePathConcat(cfg.root_dir, cfg.run_id);
+    if (!EnsureDirRecursive(cfg.root_dir) || !EnsureDirRecursive(run_dir)) {
+        return;
+    }
+    std::string layer_dir = MNNFilePathConcat(run_dir, "layer_" + std::to_string(layer_id));
+    if (!EnsureDirRecursive(layer_dir)) {
+        return;
+    }
+
+    std::string base = "packed_t0_" + std::to_string(past_length);
+    std::string k_file = "packed_k_" + base + ".bin";
+    std::string v_file = "packed_v_" + base + ".bin";
+    std::string meta_file = "packed_meta_" + base + ".json";
+
+    std::vector<uint8_t> key_buf(total_key_bytes);
+    std::vector<uint8_t> value_buf(total_value_bytes);
+    for (int h = 0; h < kv_heads; ++h) {
+        std::memcpy(key_buf.data() + static_cast<size_t>(h) * key_used_bytes_per_head,
+                    key_addr + static_cast<size_t>(h) * key_stride_bytes,
+                    key_used_bytes_per_head);
+        std::memcpy(value_buf.data() + static_cast<size_t>(h) * value_used_bytes_per_head,
+                    value_addr + static_cast<size_t>(h) * value_stride_bytes,
+                    value_used_bytes_per_head);
+    }
+    WriteBinaryFile(MNNFilePathConcat(layer_dir, k_file), key_buf.data(), key_buf.size());
+    WriteBinaryFile(MNNFilePathConcat(layer_dir, v_file), value_buf.data(), value_buf.size());
+    WritePackedMetaFile(MNNFilePathConcat(layer_dir, meta_file),
+                        layer_id,
+                        past_length,
+                        max_length,
+                        kv_heads,
+                        head_dim,
+                        bytes_per_elem,
+                        pack_h,
+                        pack_l,
+                        flash_upper_kv,
+                        key_stride_bytes,
+                        value_stride_bytes,
+                        key_used_bytes_per_head,
+                        value_used_bytes_per_head,
+                        stage,
+                        cfg.run_id,
+                        k_file,
+                        v_file);
 }
 
 } // namespace KVExp

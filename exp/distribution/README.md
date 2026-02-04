@@ -10,6 +10,7 @@
 - `MNN_KV_DUMP_RUN_ID`：可选，指定 run 目录名
 - `MNN_KV_DUMP_MAX_TOKENS`：单次 dump 最多 token 数，默认不限制
 - `MNN_KV_DUMP_STAGE`：`prefill` / `decode` / `both`，默认 `prefill`
+- `MNN_KV_DUMP_PACKED`：`1` 开启 **packed 存储布局** 导出（默认关闭）
 
 **生成 KV dump（示例）**
 ```bash
