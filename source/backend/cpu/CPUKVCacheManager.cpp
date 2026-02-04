@@ -10,6 +10,9 @@
 
 #include "CPUKVCacheManager.hpp"
 #include "core/Concurrency.h"
+#if defined(MNN_EXP_KV_DUMP)
+#include "../../../exp/distribution/kv_dump.hpp"
+#endif
 
 namespace MNN {
 
@@ -768,6 +771,20 @@ void CPUKVCacheManager::moveKV(int src, int dst, int size) {
 }
 
 void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int add) {
+#if defined(MNN_EXP_KV_DUMP)
+    KVExp::DumpKVIfEnabled(this,
+                           key,
+                           value,
+                           add,
+                           mKvNumHead,
+                           mHeadDim,
+                           mBytes,
+                           mPastLength,
+                           mQuantKey,
+                           mQuantValue,
+                           mUseFlashAttention,
+                           mMeta);
+#endif
     auto core = static_cast<CPUBackend*>(mBackend)->functions();
     int seq_len = add;
     auto divPart = UP_DIV(mKvNumHead, 1);
