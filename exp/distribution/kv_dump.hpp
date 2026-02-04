@@ -222,8 +222,27 @@ inline void DumpKVIfEnabled(const void* layer_ptr,
         return;
     }
 
-    int key_seq_len = static_cast<int>(key->length(0));
-    int value_seq_len = static_cast<int>(value->length(0));
+    int key_seq_len = 0;
+    int value_seq_len = 0;
+    if (kv_heads > 0 && head_dim > 0) {
+        size_t denom = static_cast<size_t>(kv_heads) * static_cast<size_t>(head_dim);
+        if (denom > 0) {
+            size_t key_elements = key->elementSize();
+            size_t value_elements = value->elementSize();
+            if (key_elements % denom == 0) {
+                key_seq_len = static_cast<int>(key_elements / denom);
+            }
+            if (value_elements % denom == 0) {
+                value_seq_len = static_cast<int>(value_elements / denom);
+            }
+        }
+    }
+    if (key_seq_len <= 0) {
+        key_seq_len = static_cast<int>(key->length(0));
+    }
+    if (value_seq_len <= 0) {
+        value_seq_len = static_cast<int>(value->length(0));
+    }
     int dump_seq_len = std::min(add, std::min(key_seq_len, value_seq_len));
     if (cfg.max_tokens > 0 && dump_seq_len > cfg.max_tokens) {
         dump_seq_len = cfg.max_tokens;
