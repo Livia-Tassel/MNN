@@ -70,7 +70,7 @@ def load_rope_config(path: Optional[str]) -> Dict[str, Optional[float]]:
     return {"rope_theta": rope_theta, "rope_dim": rope_dim}
 
 
-def inverse_rope_fp16(data: bytes, seq_len: int, kv_heads: int, head_dim: int, rope_theta: float, rope_dim: int) -> bytes:
+def inverse_rope_fp16(data: bytes, seq_len: int, kv_heads: int, head_dim: int, rope_theta: float, rope_dim: int, pos_offset: int) -> bytes:
     k = np.frombuffer(data, dtype=np.float16).reshape((seq_len, kv_heads, head_dim))
     k_f = k.astype(np.float32, copy=True)
     rotary_dim = min(rope_dim, head_dim)
@@ -79,7 +79,7 @@ def inverse_rope_fp16(data: bytes, seq_len: int, kv_heads: int, head_dim: int, r
     if rotary_dim <= 0:
         return k.tobytes()
     inv_freq = 1.0 / (rope_theta ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / rotary_dim))
-    pos = np.arange(seq_len, dtype=np.float32)
+    pos = pos_offset + np.arange(seq_len, dtype=np.float32)
     angles = np.outer(pos, inv_freq)
     cos = np.cos(angles)[:, None, :]
     sin = np.sin(angles)[:, None, :]
@@ -90,7 +90,7 @@ def inverse_rope_fp16(data: bytes, seq_len: int, kv_heads: int, head_dim: int, r
     return k_f.astype(np.float16).tobytes()
 
 
-def inverse_rope_fp32(data: bytes, seq_len: int, kv_heads: int, head_dim: int, rope_theta: float, rope_dim: int) -> bytes:
+def inverse_rope_fp32(data: bytes, seq_len: int, kv_heads: int, head_dim: int, rope_theta: float, rope_dim: int, pos_offset: int) -> bytes:
     k = np.frombuffer(data, dtype=np.float32).reshape((seq_len, kv_heads, head_dim))
     k_f = k.astype(np.float32, copy=True)
     rotary_dim = min(rope_dim, head_dim)
@@ -99,7 +99,7 @@ def inverse_rope_fp32(data: bytes, seq_len: int, kv_heads: int, head_dim: int, r
     if rotary_dim <= 0:
         return k.tobytes()
     inv_freq = 1.0 / (rope_theta ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / rotary_dim))
-    pos = np.arange(seq_len, dtype=np.float32)
+    pos = pos_offset + np.arange(seq_len, dtype=np.float32)
     angles = np.outer(pos, inv_freq)
     cos = np.cos(angles)[:, None, :]
     sin = np.sin(angles)[:, None, :]
@@ -181,6 +181,8 @@ def main() -> int:
         v_hi_ent = v_lo_ent = v_hi_ratio = v_lo_ratio = v_gear = 0.0
         k_rope_inv_gear = 0.0
         k_rope_inv_zstd = 0.0
+        k_rope_inv_mean_abs_diff = 0.0
+        k_rope_inv_max_abs_diff = 0.0
 
         if bytes_per_elem == 2:
             k_hi_ent, k_lo_ent, k_hi_ratio, k_lo_ratio, k_gear = gear_ratios_fp16(k_bytes, args.zstd_level)
@@ -188,14 +190,26 @@ def main() -> int:
 
             if rope_theta is not None:
                 rope_dim_final = int(rope_dim) if rope_dim is not None else head_dim
-                k_inv = inverse_rope_fp16(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final)
+                k_inv = inverse_rope_fp16(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final, int(meta.get("seq_start", 0)))
                 k_rope_inv_zstd = zstd_ratio(k_inv, args.zstd_level)
                 _, _, _, _, k_rope_inv_gear = gear_ratios_fp16(k_inv, args.zstd_level)
+                orig = np.frombuffer(k_bytes, dtype=np.float16).astype(np.float32)
+                inv = np.frombuffer(k_inv, dtype=np.float16).astype(np.float32)
+                diff = np.abs(inv - orig)
+                if diff.size:
+                    k_rope_inv_mean_abs_diff = float(diff.mean())
+                    k_rope_inv_max_abs_diff = float(diff.max())
         elif bytes_per_elem == 4:
             if rope_theta is not None:
                 rope_dim_final = int(rope_dim) if rope_dim is not None else head_dim
-                k_inv = inverse_rope_fp32(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final)
+                k_inv = inverse_rope_fp32(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final, int(meta.get("seq_start", 0)))
                 k_rope_inv_zstd = zstd_ratio(k_inv, args.zstd_level)
+                orig = np.frombuffer(k_bytes, dtype=np.float32)
+                inv = np.frombuffer(k_inv, dtype=np.float32)
+                diff = np.abs(inv - orig)
+                if diff.size:
+                    k_rope_inv_mean_abs_diff = float(diff.mean())
+                    k_rope_inv_max_abs_diff = float(diff.max())
 
         row = {
             "layer_id": meta.get("layer_id"),
@@ -221,6 +235,8 @@ def main() -> int:
             "v_gear_ratio": v_gear,
             "k_rope_inv_zstd_ratio": k_rope_inv_zstd,
             "k_rope_inv_gear_ratio": k_rope_inv_gear,
+            "k_rope_inv_mean_abs_diff": k_rope_inv_mean_abs_diff,
+            "k_rope_inv_max_abs_diff": k_rope_inv_max_abs_diff,
         }
         rows.append(row)
 
@@ -245,6 +261,7 @@ def main() -> int:
     v_zstd_avg = avg([r["v_zstd_ratio"] for r in rows])
     k_rope_inv_zstd_avg = avg([r["k_rope_inv_zstd_ratio"] for r in rows if r["k_rope_inv_zstd_ratio"] > 0.0])
     k_rope_inv_gear_avg = avg([r["k_rope_inv_gear_ratio"] for r in rows if r["k_rope_inv_gear_ratio"] > 0.0])
+    k_rope_inv_mean_abs_diff_avg = avg([r["k_rope_inv_mean_abs_diff"] for r in rows if r["k_rope_inv_mean_abs_diff"] > 0.0])
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("# KV Dump Summary\n")
@@ -260,6 +277,8 @@ def main() -> int:
             f.write(f"- Avg K inverse-RoPE zstd ratio: {k_rope_inv_zstd_avg:.3f}\n")
         if rope_theta is not None and k_rope_inv_gear_avg > 0.0:
             f.write(f"- Avg K inverse-RoPE gear ratio: {k_rope_inv_gear_avg:.3f}\n")
+        if rope_theta is not None and k_rope_inv_mean_abs_diff_avg > 0.0:
+            f.write(f"- Avg K inverse-RoPE mean abs diff: {k_rope_inv_mean_abs_diff_avg:.6f}\n")
 
     print(f"Wrote {csv_path}")
     print(f"Wrote {summary_path}")
