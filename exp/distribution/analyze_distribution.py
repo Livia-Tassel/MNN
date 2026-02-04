@@ -56,6 +56,24 @@ def gear_ratios_fp16(data: bytes, level: int) -> Tuple[float, float, float, floa
     return entropy_bytes(hi), entropy_bytes(lo), hi_ratio, lo_ratio, gear_ratio
 
 
+def split16_ratios_fp32(data: bytes, level: int) -> Tuple[float, float, float, float, float]:
+    u32 = np.frombuffer(data, dtype=np.uint32)
+    hi = (u32 >> 16).astype(np.uint16).tobytes()
+    lo = (u32 & 0xFFFF).astype(np.uint16).tobytes()
+    hi_entropy = entropy_bytes(hi)
+    lo_entropy = entropy_bytes(lo)
+    hi_ratio = zstd_ratio(hi, level)
+    lo_ratio = zstd_ratio(lo, level)
+    split_ratio = 0.0
+    if zstd is not None and (hi_ratio > 0.0 or lo_ratio > 0.0):
+        compressor = zstd.ZstdCompressor(level=level)
+        hi_c = compressor.compress(hi)
+        lo_c = compressor.compress(lo)
+        if hi_c and lo_c:
+            split_ratio = len(data) / (len(hi_c) + len(lo_c))
+    return hi_entropy, lo_entropy, hi_ratio, lo_ratio, split_ratio
+
+
 def load_rope_config(path: Optional[str]) -> Dict[str, Optional[float]]:
     if not path:
         return {}
@@ -183,6 +201,16 @@ def main() -> int:
         k_rope_inv_zstd = 0.0
         k_rope_inv_mean_abs_diff = 0.0
         k_rope_inv_max_abs_diff = 0.0
+        k_hi16_entropy = 0.0
+        k_lo16_entropy = 0.0
+        k_hi16_ratio = 0.0
+        k_lo16_ratio = 0.0
+        k_split16_ratio = 0.0
+        v_hi16_entropy = 0.0
+        v_lo16_entropy = 0.0
+        v_hi16_ratio = 0.0
+        v_lo16_ratio = 0.0
+        v_split16_ratio = 0.0
 
         if bytes_per_elem == 2:
             k_hi_ent, k_lo_ent, k_hi_ratio, k_lo_ratio, k_gear = gear_ratios_fp16(k_bytes, args.zstd_level)
@@ -200,6 +228,8 @@ def main() -> int:
                     k_rope_inv_mean_abs_diff = float(diff.mean())
                     k_rope_inv_max_abs_diff = float(diff.max())
         elif bytes_per_elem == 4:
+            k_hi16_entropy, k_lo16_entropy, k_hi16_ratio, k_lo16_ratio, k_split16_ratio = split16_ratios_fp32(k_bytes, args.zstd_level)
+            v_hi16_entropy, v_lo16_entropy, v_hi16_ratio, v_lo16_ratio, v_split16_ratio = split16_ratios_fp32(v_bytes, args.zstd_level)
             if rope_theta is not None:
                 rope_dim_final = int(rope_dim) if rope_dim is not None else head_dim
                 k_inv = inverse_rope_fp32(k_bytes, seq_len, kv_heads, head_dim, float(rope_theta), rope_dim_final, int(meta.get("seq_start", 0)))
@@ -237,6 +267,16 @@ def main() -> int:
             "k_rope_inv_gear_ratio": k_rope_inv_gear,
             "k_rope_inv_mean_abs_diff": k_rope_inv_mean_abs_diff,
             "k_rope_inv_max_abs_diff": k_rope_inv_max_abs_diff,
+            "k_hi16_entropy": k_hi16_entropy,
+            "k_lo16_entropy": k_lo16_entropy,
+            "k_hi16_ratio": k_hi16_ratio,
+            "k_lo16_ratio": k_lo16_ratio,
+            "k_split16_ratio": k_split16_ratio,
+            "v_hi16_entropy": v_hi16_entropy,
+            "v_lo16_entropy": v_lo16_entropy,
+            "v_hi16_ratio": v_hi16_ratio,
+            "v_lo16_ratio": v_lo16_ratio,
+            "v_split16_ratio": v_split16_ratio,
         }
         rows.append(row)
 
@@ -262,6 +302,8 @@ def main() -> int:
     k_rope_inv_zstd_avg = avg([r["k_rope_inv_zstd_ratio"] for r in rows if r["k_rope_inv_zstd_ratio"] > 0.0])
     k_rope_inv_gear_avg = avg([r["k_rope_inv_gear_ratio"] for r in rows if r["k_rope_inv_gear_ratio"] > 0.0])
     k_rope_inv_mean_abs_diff_avg = avg([r["k_rope_inv_mean_abs_diff"] for r in rows if r["k_rope_inv_mean_abs_diff"] > 0.0])
+    k_split16_avg = avg([r["k_split16_ratio"] for r in rows if r["k_split16_ratio"] > 0.0])
+    v_split16_avg = avg([r["v_split16_ratio"] for r in rows if r["v_split16_ratio"] > 0.0])
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("# KV Dump Summary\n")
@@ -273,6 +315,10 @@ def main() -> int:
             f.write(f"- Avg V gear ratio: {v_gear_avg:.3f}\n")
         f.write(f"- Avg K zstd ratio: {k_zstd_avg:.3f}\n")
         f.write(f"- Avg V zstd ratio: {v_zstd_avg:.3f}\n")
+        if k_split16_avg > 0.0:
+            f.write(f"- Avg K split16 zstd ratio: {k_split16_avg:.3f}\n")
+        if v_split16_avg > 0.0:
+            f.write(f"- Avg V split16 zstd ratio: {v_split16_avg:.3f}\n")
         if rope_theta is not None and k_rope_inv_zstd_avg > 0.0:
             f.write(f"- Avg K inverse-RoPE zstd ratio: {k_rope_inv_zstd_avg:.3f}\n")
         if rope_theta is not None and k_rope_inv_gear_avg > 0.0:
