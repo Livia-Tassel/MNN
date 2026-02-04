@@ -239,22 +239,27 @@ def main() -> int:
         vals = [v for v in values if v is not None]
         return sum(vals) / len(vals) if vals else 0.0
 
-    k_gear_avg = avg([r["k_gear_ratio"] for r in rows])
-    v_gear_avg = avg([r["v_gear_ratio"] for r in rows])
+    k_gear_avg = avg([r["k_gear_ratio"] for r in rows if r["k_gear_ratio"] > 0.0])
+    v_gear_avg = avg([r["v_gear_ratio"] for r in rows if r["v_gear_ratio"] > 0.0])
     k_zstd_avg = avg([r["k_zstd_ratio"] for r in rows])
     v_zstd_avg = avg([r["v_zstd_ratio"] for r in rows])
-    k_rope_inv_avg = avg([r["k_rope_inv_gear_ratio"] for r in rows])
+    k_rope_inv_zstd_avg = avg([r["k_rope_inv_zstd_ratio"] for r in rows if r["k_rope_inv_zstd_ratio"] > 0.0])
+    k_rope_inv_gear_avg = avg([r["k_rope_inv_gear_ratio"] for r in rows if r["k_rope_inv_gear_ratio"] > 0.0])
 
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("# KV Dump Summary\n")
         f.write("\n")
         f.write(f"- Dumps analyzed: {len(rows)}\n")
-        f.write(f"- Avg K gear ratio: {k_gear_avg:.3f}\n")
-        f.write(f"- Avg V gear ratio: {v_gear_avg:.3f}\n")
+        if k_gear_avg > 0.0:
+            f.write(f"- Avg K gear ratio: {k_gear_avg:.3f}\n")
+        if v_gear_avg > 0.0:
+            f.write(f"- Avg V gear ratio: {v_gear_avg:.3f}\n")
         f.write(f"- Avg K zstd ratio: {k_zstd_avg:.3f}\n")
         f.write(f"- Avg V zstd ratio: {v_zstd_avg:.3f}\n")
-        if rope_theta is not None:
-            f.write(f"- Avg K inverse-RoPE gear ratio: {k_rope_inv_avg:.3f}\n")
+        if rope_theta is not None and k_rope_inv_zstd_avg > 0.0:
+            f.write(f"- Avg K inverse-RoPE zstd ratio: {k_rope_inv_zstd_avg:.3f}\n")
+        if rope_theta is not None and k_rope_inv_gear_avg > 0.0:
+            f.write(f"- Avg K inverse-RoPE gear ratio: {k_rope_inv_gear_avg:.3f}\n")
 
     print(f"Wrote {csv_path}")
     print(f"Wrote {summary_path}")
