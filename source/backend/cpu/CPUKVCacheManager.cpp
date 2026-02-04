@@ -808,8 +808,8 @@ void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int
     mPastLength += seq_len;
 #if defined(MNN_EXP_KV_DUMP)
     KVExp::DumpPackedKVIfEnabled(this,
-                                 addrOfKey(0),
-                                 addrOfValue(0),
+                                 reinterpret_cast<const uint8_t*>(addrOfKey(0)),
+                                 reinterpret_cast<const uint8_t*>(addrOfValue(0)),
                                  add,
                                  mKvNumHead,
                                  mHeadDim,
