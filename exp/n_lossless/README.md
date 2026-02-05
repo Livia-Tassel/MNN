@@ -40,6 +40,50 @@ python3 exp/n_lossless/analyze_mixed.py \
 - `lossy_error_metrics.csv` — MAE/RMSE/max_abs/cosine on lossy layers
 - `mixed_summary.md` — weighted ratios for overall / lossless / lossy
 
+## Block-Norm (Partial De-Normalization)
+This script evaluates **block normalization + partial de-normalization (top-k blocks)**.
+
+```bash
+python3 exp/n_lossless/analyze_blocknorm.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/n_lossless/out/demo_20260205_102843_prompt_128_1_blocknorm \
+  --stage both \
+  --lossless-first-n 2 \
+  --block-size 256 \
+  --topk-ratio 0.05 \
+  --bits 10 \
+  --compress-mode gear-delta \
+  --zstd-level 3
+```
+
+Outputs:
+- `blocknorm_metrics.csv`
+- `blocknorm_summary.md`
+
+## Block-Norm Sweep (Find Best Trade-off)
+Sweeps a grid of parameters and reports the best combinations.
+
+```bash
+python3 exp/n_lossless/sweep_blocknorm.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/n_lossless/out/blocknorm_sweep_20260205_170000 \
+  --stage both \
+  --lossless-first-n 2 \
+  --block-sizes 64,128,256 \
+  --topk-ratios 0.02,0.05,0.1 \
+  --bits-list 8,10 \
+  --compress-mode gear-delta \
+  --zstd-level 3 \
+  --min-k-cosine 0.9999 \
+  --min-v-cosine 0.9999 \
+  --max-k-mae 0.01 \
+  --max-v-mae 0.002
+```
+
+Outputs:
+- `blocknorm_sweep.csv`
+- `blocknorm_best.md`
+
 ## Lossy Compare (clip + quantize)
 This script evaluates **outlier clipping + uniform quantization** on lossy layers.
 
