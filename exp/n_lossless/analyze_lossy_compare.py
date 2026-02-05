@@ -159,8 +159,12 @@ def main() -> int:
     parser.add_argument("--zstd-level", type=int, default=3)
     parser.add_argument("--compress-mode", choices=["gear", "gear-delta", "zstd"], default="gear-delta")
     parser.add_argument("--bits", type=int, default=8, help="Quantization bits for lossy layers.")
+    parser.add_argument("--bits-list", default="", help="Comma list of bits, e.g. 4,6,8,10 (overrides --bits).")
     parser.add_argument("--clip-percentiles", default="1,99", help="Percentile clip range, e.g., 1,99")
     parser.add_argument("--clip-sigma", type=float, default=3.0, help="Sigma clip (mean ± k*std)")
+    parser.add_argument("--modes", default="clip,quant,clip-quant",
+                        help="Comma list: clip, quant, clip-quant")
+    parser.add_argument("--clip-method", choices=["percentile", "sigma", "both"], default="both")
     args = parser.parse_args()
 
     if zstd is None:
@@ -172,6 +176,9 @@ def main() -> int:
     summary_path = os.path.join(args.out_dir, "lossy_compare_summary.md")
 
     p_low, p_high = [float(x.strip()) for x in args.clip_percentiles.split(",")]
+    modes = {m.strip() for m in args.modes.split(",") if m.strip()}
+    clip_methods = ["percentile", "sigma"] if args.clip_method == "both" else [args.clip_method]
+    bits_list = [int(x.strip()) for x in args.bits_list.split(",") if x.strip()] or [args.bits]
 
     rows = []
     totals = {}
@@ -216,24 +223,25 @@ def main() -> int:
         if is_lossless:
             continue
 
-        # Lossy methods
-        methods = [
-            ("clip_percentile", clip_by_percentile(k, p_low, p_high)),
-            ("clip_sigma", clip_by_sigma(k, args.clip_sigma)),
-        ]
+        # Build clip variants
+        clip_variants = {}
+        for method in clip_methods:
+            if method == "percentile":
+                clip_variants["clip_percentile"] = clip_by_percentile(k, p_low, p_high)
+                clip_variants["clip_percentile_v"] = clip_by_percentile(v, p_low, p_high)
+            elif method == "sigma":
+                clip_variants["clip_sigma"] = clip_by_sigma(k, args.clip_sigma)
+                clip_variants["clip_sigma_v"] = clip_by_sigma(v, args.clip_sigma)
 
-        for name, k_clip in methods:
-            k_q = quantize_uniform(k_clip, args.bits)
-            v_q = quantize_uniform(v, args.bits)
-            k_err = compute_error_metrics(k, k_q)
-            v_err = compute_error_metrics(v, v_q)
-
+        def record(name: str, k_arr: np.ndarray, v_arr: np.ndarray, bits: int) -> None:
+            k_err = compute_error_metrics(k, k_arr)
+            v_err = compute_error_metrics(v, v_arr)
             if bytes_per_elem == 2:
-                k_comp = compress_fp16_gear(k_q.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
-                v_comp = compress_fp16_gear(v_q.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                k_comp = compress_fp16_gear(k_arr.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                v_comp = compress_fp16_gear(v_arr.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
             else:
-                k_comp = compress_fp32_split16(k_q.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
-                v_comp = compress_fp32_split16(v_q.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                k_comp = compress_fp32_split16(k_arr.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                v_comp = compress_fp32_split16(v_arr.tobytes(), seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
 
             k_raw = k.nbytes
             v_raw = v.nbytes
@@ -248,7 +256,7 @@ def main() -> int:
                 "head_dim": head_dim,
                 "bytes_per_elem": bytes_per_elem,
                 "method": name,
-                "bits": args.bits,
+                "bits": bits,
                 "k_ratio": k_ratio,
                 "v_ratio": v_ratio,
                 "k_mae": k_err["mae"],
@@ -257,7 +265,7 @@ def main() -> int:
                 "v_cosine": v_err["cosine"],
             })
 
-            key = (name, args.bits)
+            key = (name, bits)
             if key not in totals:
                 totals[key] = {"k_raw": 0.0, "k_comp": 0.0, "v_raw": 0.0, "v_comp": 0.0,
                                "k_mae_sum": 0.0, "k_cos_sum": 0.0, "v_mae_sum": 0.0, "v_cos_sum": 0.0, "elems": 0}
@@ -271,6 +279,34 @@ def main() -> int:
             t["v_mae_sum"] += v_err["mae"] * v.size
             t["v_cos_sum"] += v_err["cosine"] * v.size
             t["elems"] += k.size
+
+        # clip only (no quant)
+        if "clip" in modes:
+            for method in clip_methods:
+                if method == "percentile":
+                    record("clip_percentile", clip_variants["clip_percentile"], clip_variants["clip_percentile_v"], 0)
+                elif method == "sigma":
+                    record("clip_sigma", clip_variants["clip_sigma"], clip_variants["clip_sigma_v"], 0)
+
+        # quant only (no clip)
+        if "quant" in modes:
+            for bits in bits_list:
+                record("quant_only", quantize_uniform(k, bits), quantize_uniform(v, bits), bits)
+
+        # clip + quant
+        if "clip-quant" in modes:
+            for bits in bits_list:
+                for method in clip_methods:
+                    if method == "percentile":
+                        record("clip_percentile+quant",
+                               quantize_uniform(clip_variants["clip_percentile"], bits),
+                               quantize_uniform(clip_variants["clip_percentile_v"], bits),
+                               bits)
+                    elif method == "sigma":
+                        record("clip_sigma+quant",
+                               quantize_uniform(clip_variants["clip_sigma"], bits),
+                               quantize_uniform(clip_variants["clip_sigma_v"], bits),
+                               bits)
 
     if not rows:
         print("No lossy rows after filtering.", file=sys.stderr)

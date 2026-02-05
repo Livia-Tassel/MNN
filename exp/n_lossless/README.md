@@ -48,9 +48,11 @@ python3 exp/n_lossless/analyze_lossy_compare.py \
   --out-dir exp/n_lossless/out/demo_20260205_102843_prompt_128_1_lossy \
   --stage both \
   --lossless-first-n 2 \
-  --bits 8 \
+  --bits-list 4,6,8,10 \
   --clip-percentiles 1,99 \
   --clip-sigma 3.0 \
+  --modes clip,quant,clip-quant \
+  --clip-method both \
   --compress-mode gear-delta \
   --zstd-level 3
 ```
