@@ -35,6 +35,7 @@ def main() -> int:
     parser.add_argument("--topk-ratios", default="0.02,0.05,0.1")
     parser.add_argument("--bits-list", default="8,10")
     parser.add_argument("--scale-bytes", type=int, default=2)
+    parser.add_argument("--topk-extra-scale-bytes", type=int, default=4)
     parser.add_argument("--index-bytes", type=int, default=4)
     parser.add_argument("--compress-mode", choices=["gear", "gear-delta", "zstd"], default="gear-delta")
     parser.add_argument("--zstd-level", type=int, default=3)
@@ -74,6 +75,7 @@ def main() -> int:
             topk_ratio=topk_ratio,
             bits=bits,
             scale_bytes=args.scale_bytes,
+            topk_extra_scale_bytes=args.topk_extra_scale_bytes,
             index_bytes=args.index_bytes,
             compress_mode=args.compress_mode,
             zstd_level=args.zstd_level,

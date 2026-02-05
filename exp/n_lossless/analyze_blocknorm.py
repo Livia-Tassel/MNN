@@ -105,6 +105,8 @@ def block_normalize_quantize(
     block_size: int,
     bits: int,
     topk_ratio: float,
+    scale_bytes: int,
+    topk_extra_scale_bytes: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     # x shape: (seq_len, heads, head_dim)
     seq_len, heads, head_dim = x.shape
@@ -117,8 +119,12 @@ def block_normalize_quantize(
         x_2d = np.concatenate([x_2d, pad], axis=1)
 
     blocks = x_2d.reshape(-1, block_size)
-    scales = np.max(np.abs(blocks), axis=1)
+    scales = np.max(np.abs(blocks), axis=1).astype(np.float32)
     scales[scales == 0] = 1.0
+    if scale_bytes == 2:
+        scales_store = scales.astype(np.float16).astype(np.float32)
+    else:
+        scales_store = scales
     norm = blocks / scales[:, None]
 
     qmax = (1 << (bits - 1)) - 1
@@ -133,7 +139,11 @@ def block_normalize_quantize(
 
     # restore only top-k blocks
     restored = norm_q.copy()
-    restored[topk_idx] = restored[topk_idx] * scales[topk_idx, None]
+    # Default restore uses stored (possibly lower-precision) scales
+    restored = restored * scales_store[:, None]
+    # Top-k blocks optionally use full-precision scales
+    if topk_extra_scale_bytes > 0:
+        restored[topk_idx] = norm_q[topk_idx] * scales[topk_idx, None]
 
     # reshape back and trim padding
     restored_2d = restored.reshape(-1, padded_dim)[:, :head_dim]
@@ -142,7 +152,7 @@ def block_normalize_quantize(
     restored_x = restored_2d.reshape(seq_len, heads, head_dim)
     stored_x = stored_2d.reshape(seq_len, heads, head_dim)
 
-    return stored_x, restored_x, scales, total_blocks, topk
+    return stored_x, restored_x, scales_store, total_blocks, topk
 
 
 def main() -> int:
@@ -156,7 +166,8 @@ def main() -> int:
     parser.add_argument("--block-size", type=int, default=64)
     parser.add_argument("--topk-ratio", type=float, default=0.8)
     parser.add_argument("--bits", type=int, default=10)
-    parser.add_argument("--scale-bytes", type=int, default=2, help="Bytes per stored scale.")
+    parser.add_argument("--scale-bytes", type=int, default=2, help="Bytes per stored scale for all blocks (2=fp16, 4=fp32).")
+    parser.add_argument("--topk-extra-scale-bytes", type=int, default=4, help="Extra bytes for top-k full-precision scales (0 to disable).")
     parser.add_argument("--index-bytes", type=int, default=4, help="Bytes per stored block index.")
     parser.add_argument("--compress-mode", choices=["gear", "gear-delta", "zstd"], default="gear-delta")
     parser.add_argument("--zstd-level", type=int, default=3)
@@ -172,6 +183,7 @@ def main() -> int:
         topk_ratio=args.topk_ratio,
         bits=args.bits,
         scale_bytes=args.scale_bytes,
+        topk_extra_scale_bytes=args.topk_extra_scale_bytes,
         index_bytes=args.index_bytes,
         compress_mode=args.compress_mode,
         zstd_level=args.zstd_level,
@@ -199,6 +211,7 @@ def evaluate_blocknorm(
     topk_ratio: float,
     bits: int,
     scale_bytes: int,
+    topk_extra_scale_bytes: int,
     index_bytes: int,
     compress_mode: str,
     zstd_level: int,
@@ -251,10 +264,10 @@ def evaluate_blocknorm(
         v = np.frombuffer(open(v_path, "rb").read(), dtype=dtype).reshape(seq_len, kv_heads, head_dim)
 
         k_stored, k_restored, k_scales, k_total_blocks, k_topk = block_normalize_quantize(
-            k, block_size, bits, topk_ratio
+            k, block_size, bits, topk_ratio, scale_bytes, topk_extra_scale_bytes
         )
         v_stored, v_restored, v_scales, v_total_blocks, v_topk = block_normalize_quantize(
-            v, block_size, bits, topk_ratio
+            v, block_size, bits, topk_ratio, scale_bytes, topk_extra_scale_bytes
         )
 
         # compression size = compressed stored data + topk metadata
@@ -268,8 +281,9 @@ def evaluate_blocknorm(
             v_comp = compress_fp32_split16(v_bytes, seq_len, kv_heads, head_dim, zstd_level, compress_mode == "gear-delta")
 
         # metadata bytes: store scales + indices for top-k blocks only
-        k_meta = k_topk * (scale_bytes + index_bytes)
-        v_meta = v_topk * (scale_bytes + index_bytes)
+        # metadata: all blocks store scale + top-k extra scale + top-k indices
+        k_meta = k_total_blocks * scale_bytes + k_topk * (topk_extra_scale_bytes + index_bytes)
+        v_meta = v_total_blocks * scale_bytes + v_topk * (topk_extra_scale_bytes + index_bytes)
         k_comp_total = k_comp + k_meta
         v_comp_total = v_comp + v_meta
 
@@ -322,6 +336,8 @@ def evaluate_blocknorm(
         f.write(f"- Block size: {block_size}\n")
         f.write(f"- Top-k ratio: {topk_ratio}\n")
         f.write(f"- Quant bits: {bits}\n")
+        f.write(f"- Scale bytes (all blocks): {scale_bytes}\n")
+        f.write(f"- Extra scale bytes (top-k): {topk_extra_scale_bytes}\n")
         f.write(f"- Compress mode: {compress_mode}\n\n")
         k_ratio = ratio(totals["k_raw"], totals["k_comp"])
         v_ratio = ratio(totals["v_raw"], totals["v_comp"])

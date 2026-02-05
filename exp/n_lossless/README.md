@@ -52,6 +52,8 @@ python3 exp/n_lossless/analyze_blocknorm.py \
   --block-size 256 \
   --topk-ratio 0.05 \
   --bits 10 \
+  --scale-bytes 2 \
+  --topk-extra-scale-bytes 4 \
   --compress-mode gear-delta \
   --zstd-level 3
 ```
@@ -72,6 +74,8 @@ python3 exp/n_lossless/sweep_blocknorm.py \
   --block-sizes 64,128,256 \
   --topk-ratios 0.02,0.05,0.1 \
   --bits-list 8,10 \
+  --scale-bytes 2 \
+  --topk-extra-scale-bytes 4 \
   --compress-mode gear-delta \
   --zstd-level 3 \
   --min-k-cosine 0.9999 \
