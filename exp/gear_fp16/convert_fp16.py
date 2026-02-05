@@ -59,7 +59,16 @@ def main() -> int:
     errors = 0
 
     for meta_path in meta_files:
-        meta = load_json(meta_path)
+        try:
+            meta = load_json(meta_path)
+        except json.JSONDecodeError:
+            print(f"Skip {meta_path}: invalid JSON (likely partial write).", file=sys.stderr)
+            errors += 1
+            continue
+        except Exception as exc:
+            print(f"Skip {meta_path}: {exc}", file=sys.stderr)
+            errors += 1
+            continue
         stage = meta.get("stage", "unknown")
         if not should_keep_stage(stage, args.stage):
             skipped += 1
@@ -132,6 +141,12 @@ def main() -> int:
                 f.write(v_out)
             write_json(dst_meta_path, new_meta)
             converted += 1
+        except OSError as exc:
+            if exc.errno == 28:
+                print(f"Error converting {meta_path}: No space left on device.", file=sys.stderr)
+                return 3
+            print(f"Error converting {meta_path}: {exc}", file=sys.stderr)
+            errors += 1
         except Exception as exc:
             print(f"Error converting {meta_path}: {exc}", file=sys.stderr)
             errors += 1
