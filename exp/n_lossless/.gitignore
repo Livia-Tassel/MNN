@@ -1,0 +1,8 @@
+# Local experiment artifacts
+out/
+prompts/
+dumps/
+dumps_raw/
+dumps_fp16/
+*.bin
+*.json
