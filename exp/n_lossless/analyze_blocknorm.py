@@ -77,8 +77,8 @@ def compress_fp32_split16(data: bytes, seq_len: int, heads: int, head_dim: int, 
 
 
 def compute_error_metrics(orig: np.ndarray, lossy: np.ndarray) -> Dict[str, float]:
-    a = orig.astype(np.float32)
-    b = lossy.astype(np.float32)
+    a = orig.astype(np.float32).ravel()
+    b = lossy.astype(np.float32).ravel()
     if a.size == 0:
         return {"mae": 0.0, "rmse": 0.0, "max_abs": 0.0, "cosine": 0.0}
     diff = a - b
