@@ -94,6 +94,23 @@ def truncate_fp32(data: bytes, keep_mantissa_bits: int) -> bytes:
     return (u32 & mask).astype(np.uint32).tobytes()
 
 
+def quantize_uniform_array(x: np.ndarray, bits: int) -> np.ndarray:
+    xf = x.astype(np.float32, copy=False)
+    max_abs = float(np.max(np.abs(xf))) if xf.size else 0.0
+    if max_abs == 0.0:
+        return x.copy()
+    qmax = (1 << (bits - 1)) - 1
+    scale = max_abs / qmax
+    q = np.round(xf / scale).clip(-qmax, qmax)
+    return (q * scale).astype(x.dtype)
+
+
+def quantize_uniform_bytes(data: bytes, dtype: np.dtype, bits: int) -> bytes:
+    arr = np.frombuffer(data, dtype=dtype)
+    q = quantize_uniform_array(arr, bits)
+    return q.tobytes()
+
+
 def compute_error_metrics(orig: bytes, lossy: bytes, dtype: np.dtype) -> Dict[str, float]:
     a = np.frombuffer(orig, dtype=dtype).astype(np.float32)
     b = np.frombuffer(lossy, dtype=dtype).astype(np.float32)
@@ -126,7 +143,9 @@ def main() -> int:
     parser.add_argument("--min-seq-len", type=int, default=0)
     parser.add_argument("--max-seq-len", type=int, default=0)
     parser.add_argument("--lossless-first-n", type=int, default=2, help="First N layers to use lossless compression.")
-    parser.add_argument("--lossy-mantissa-bits", type=int, default=6, help="Mantissa bits to keep for lossy layers.")
+    parser.add_argument("--lossy-method", choices=["truncate", "quant"], default="truncate", help="Lossy method for tail layers.")
+    parser.add_argument("--lossy-mantissa-bits", type=int, default=6, help="Mantissa bits to keep (truncate method).")
+    parser.add_argument("--lossy-bits", type=int, default=8, help="Quantization bits (quant method).")
     parser.add_argument("--compress-mode", choices=["gear", "gear-delta", "zstd"], default="gear-delta")
     parser.add_argument("--zstd-level", type=int, default=3)
     args = parser.parse_args()
@@ -208,16 +227,26 @@ def main() -> int:
                 k_comp = compress_fp32_split16(k_bytes, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
                 v_comp = compress_fp32_split16(v_bytes, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
         else:
-            if bytes_per_elem == 2:
-                k_lossy = truncate_fp16(k_bytes, args.lossy_mantissa_bits)
-                v_lossy = truncate_fp16(v_bytes, args.lossy_mantissa_bits)
-                k_comp = compress_fp16_gear(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
-                v_comp = compress_fp16_gear(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+            if args.lossy_method == "truncate":
+                if bytes_per_elem == 2:
+                    k_lossy = truncate_fp16(k_bytes, args.lossy_mantissa_bits)
+                    v_lossy = truncate_fp16(v_bytes, args.lossy_mantissa_bits)
+                    k_comp = compress_fp16_gear(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                    v_comp = compress_fp16_gear(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                else:
+                    k_lossy = truncate_fp32(k_bytes, args.lossy_mantissa_bits)
+                    v_lossy = truncate_fp32(v_bytes, args.lossy_mantissa_bits)
+                    k_comp = compress_fp32_split16(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                    v_comp = compress_fp32_split16(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
             else:
-                k_lossy = truncate_fp32(k_bytes, args.lossy_mantissa_bits)
-                v_lossy = truncate_fp32(v_bytes, args.lossy_mantissa_bits)
-                k_comp = compress_fp32_split16(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
-                v_comp = compress_fp32_split16(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                k_lossy = quantize_uniform_bytes(k_bytes, dtype, args.lossy_bits)
+                v_lossy = quantize_uniform_bytes(v_bytes, dtype, args.lossy_bits)
+                if bytes_per_elem == 2:
+                    k_comp = compress_fp16_gear(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                    v_comp = compress_fp16_gear(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                else:
+                    k_comp = compress_fp32_split16(k_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
+                    v_comp = compress_fp32_split16(v_lossy, seq_len, kv_heads, head_dim, args.zstd_level, args.compress_mode == "gear-delta")
 
             k_err = compute_error_metrics(k_bytes, k_lossy, dtype)
             v_err = compute_error_metrics(v_bytes, v_lossy, dtype)
@@ -303,7 +332,11 @@ def main() -> int:
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("# Mixed Compression Summary\n\n")
         f.write(f"- Lossless first N layers: {args.lossless_first_n}\n")
-        f.write(f"- Lossy mantissa bits: {args.lossy_mantissa_bits}\n")
+        f.write(f"- Lossy method: {args.lossy_method}\n")
+        if args.lossy_method == "truncate":
+            f.write(f"- Lossy mantissa bits: {args.lossy_mantissa_bits}\n")
+        else:
+            f.write(f"- Lossy quant bits: {args.lossy_bits}\n")
         f.write(f"- Compress mode: {args.compress_mode}\n")
         f.write(f"- Dumps analyzed: {len(rows)}\n\n")
         f.write("## Weighted Ratios (overall)\n")

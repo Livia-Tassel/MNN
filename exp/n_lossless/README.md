@@ -29,7 +29,8 @@ python3 exp/n_lossless/analyze_mixed.py \
   --out-dir exp/n_lossless/out/demo_20260205_102843_prompt_128_1 \
   --stage both \
   --lossless-first-n 2 \
-  --lossy-mantissa-bits 6 \
+  --lossy-method quant \
+  --lossy-bits 8 \
   --compress-mode gear-delta \
   --zstd-level 3
 ```
