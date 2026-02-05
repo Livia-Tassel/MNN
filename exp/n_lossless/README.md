@@ -39,6 +39,26 @@ python3 exp/n_lossless/analyze_mixed.py \
 - `lossy_error_metrics.csv` — MAE/RMSE/max_abs/cosine on lossy layers
 - `mixed_summary.md` — weighted ratios for overall / lossless / lossy
 
+## Lossy Compare (clip + quantize)
+This script evaluates **outlier clipping + uniform quantization** on lossy layers.
+
+```bash
+python3 exp/n_lossless/analyze_lossy_compare.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/n_lossless/out/demo_20260205_102843_prompt_128_1_lossy \
+  --stage both \
+  --lossless-first-n 2 \
+  --bits 8 \
+  --clip-percentiles 1,99 \
+  --clip-sigma 3.0 \
+  --compress-mode gear-delta \
+  --zstd-level 3
+```
+
+Outputs:
+- `lossy_compare.csv`
+- `lossy_compare_summary.md`
+
 ## Notes
 - `lossless-first-n` defines the split point.
 - `lossy-mantissa-bits` controls truncation strength for FP16/FP32.
