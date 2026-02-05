@@ -91,26 +91,37 @@ def compute_error_metrics(orig: np.ndarray, lossy: np.ndarray) -> Dict[str, floa
 
 
 def clip_by_percentile(x: np.ndarray, p_low: float, p_high: float) -> np.ndarray:
-    low = np.percentile(x, p_low)
-    high = np.percentile(x, p_high)
+    xf = x.astype(np.float32, copy=False)
+    finite = np.isfinite(xf)
+    if not finite.any():
+        return x
+    xf = xf[finite]
+    low = float(np.percentile(xf, p_low))
+    high = float(np.percentile(xf, p_high))
     return np.clip(x, low, high)
 
 
 def clip_by_sigma(x: np.ndarray, k: float) -> np.ndarray:
-    mean = float(np.mean(x))
-    std = float(np.std(x))
+    xf = x.astype(np.float32, copy=False)
+    finite = np.isfinite(xf)
+    if not finite.any():
+        return x
+    xf = xf[finite]
+    mean = float(np.mean(xf))
+    std = float(np.std(xf))
     return np.clip(x, mean - k * std, mean + k * std)
 
 
 def quantize_uniform(x: np.ndarray, bits: int, per_axis: int = None) -> np.ndarray:
     # symmetric quantization
     if per_axis is None:
-        max_abs = np.max(np.abs(x)) if x.size else 0.0
+        xf = x.astype(np.float32, copy=False)
+        max_abs = float(np.max(np.abs(xf))) if x.size else 0.0
         if max_abs == 0:
             return x.copy()
         qmax = (1 << (bits - 1)) - 1
         scale = max_abs / qmax
-        q = np.round(x / scale).clip(-qmax, qmax)
+        q = np.round(xf / scale).clip(-qmax, qmax)
         return (q * scale).astype(x.dtype)
 
     # per-axis: quantize along given axis (e.g., head_dim or head)
@@ -120,12 +131,13 @@ def quantize_uniform(x: np.ndarray, bits: int, per_axis: int = None) -> np.ndarr
         slicer = [slice(None)] * x.ndim
         slicer[per_axis] = idx
         sub = x[tuple(slicer)]
-        max_abs = np.max(np.abs(sub)) if sub.size else 0.0
+        sub_f = sub.astype(np.float32, copy=False)
+        max_abs = float(np.max(np.abs(sub_f))) if sub.size else 0.0
         if max_abs == 0:
             x_q[tuple(slicer)] = sub
             continue
         scale = max_abs / qmax
-        q = np.round(sub / scale).clip(-qmax, qmax)
+        q = np.round(sub_f / scale).clip(-qmax, qmax)
         x_q[tuple(slicer)] = (q * scale).astype(x.dtype)
     return x_q
 
