@@ -8,3 +8,4 @@ dumps_fp16/
 *.json
 *.huff
 *.ac
+*.rans

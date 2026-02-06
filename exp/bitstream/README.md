@@ -83,6 +83,42 @@ python3 exp/bitstream/analyze_arith.py \
   --include-meta
 ```
 
+## rANS Context Encode (hi6 delta + lo10 context)
+```bash
+python3 exp/bitstream/encode_rans_ctx.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --stage both \
+  --buckets 4096 \
+  --hash-a 131 \
+  --hash-b 17
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.rans`, `k_lo10_<meta>.rans`
+- `v_hi6_<meta>.rans`, `v_lo10_<meta>.rans`
+- `rans_<meta>.json`
+Codebooks (per group):
+- `codebook_k_prefill.json`, `codebook_k_decode.json`
+- `codebook_v_prefill.json`, `codebook_v_decode.json`
+
+## rANS Context Decode + Verify
+```bash
+python3 exp/bitstream/decode_rans_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## rANS Context Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_rans_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --include-meta
+```
+
 ## Notes
 - Encoding splits FP16 into `hi6` (sign+exp) and `lo10` (mantissa).
 - `global` codebook mode is recommended to keep metadata overhead low.
