@@ -119,6 +119,43 @@ python3 exp/bitstream/analyze_rans_ctx.py \
   --include-meta
 ```
 
+## CABAC Context Encode (hi6 delta + lo10 context, adaptive)
+```bash
+python3 exp/bitstream/encode_cabac_ctx.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --stage both \
+  --hi6-buckets 512 \
+  --lo10-buckets 16384 \
+  --hash-a 131 --hash-b 17 --hash-c 257 --hash-d 31 \
+  --prefix-bits 3
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.cabac`, `k_lo10_<meta>.cabac`
+- `v_hi6_<meta>.cabac`, `v_lo10_<meta>.cabac`
+- `cabac_<meta>.json`
+Codebooks (per group):
+- `cabac_codebook_k_prefill.json`, `cabac_codebook_k_decode.json`
+- `cabac_codebook_v_prefill.json`, `cabac_codebook_v_decode.json`
+
+## CABAC Context Decode + Verify
+```bash
+python3 exp/bitstream/decode_cabac_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## CABAC Context Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_cabac_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --include-meta
+```
+
 ## Notes
 - Encoding splits FP16 into `hi6` (sign+exp) and `lo10` (mantissa).
 - `global` codebook mode is recommended to keep metadata overhead low.

@@ -9,3 +9,4 @@ dumps_fp16/
 *.huff
 *.ac
 *.rans
+*.cabac
