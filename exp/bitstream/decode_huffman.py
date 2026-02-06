@@ -37,6 +37,11 @@ def main() -> int:
     checked = 0
     failed = 0
 
+    global_codebook = None
+    global_path = os.path.join(args.bitstream_dir, "global_codebook.json")
+    if os.path.exists(global_path):
+        global_codebook = load_json(global_path)
+
     for meta_path in meta_files:
         meta = load_json(meta_path)
         rel_dir = os.path.relpath(os.path.dirname(meta_path), args.bitstream_dir)
@@ -48,10 +53,18 @@ def main() -> int:
         v_lo10_path = os.path.join(os.path.dirname(meta_path), meta["v_lo10_file"])
 
         num = int(meta["num_elements"])
-        k_hi6_len = meta["k_hi6_code_lengths"]
-        k_lo10_len = meta["k_lo10_code_lengths"]
-        v_hi6_len = meta["v_hi6_code_lengths"]
-        v_lo10_len = meta["v_lo10_code_lengths"]
+        if meta.get("codebook") == "global":
+            if global_codebook is None:
+                raise ValueError("Missing global_codebook.json for global codebook decode.")
+            k_hi6_len = global_codebook["k_hi6_code_lengths"]
+            k_lo10_len = global_codebook["k_lo10_code_lengths"]
+            v_hi6_len = global_codebook["v_hi6_code_lengths"]
+            v_lo10_len = global_codebook["v_lo10_code_lengths"]
+        else:
+            k_hi6_len = meta["k_hi6_code_lengths"]
+            k_lo10_len = meta["k_lo10_code_lengths"]
+            v_hi6_len = meta["v_hi6_code_lengths"]
+            v_lo10_len = meta["v_lo10_code_lengths"]
 
         k_hi6 = decode_symbols(open(k_hi6_path, "rb").read(), k_hi6_len, num)
         k_lo10 = decode_symbols(open(k_lo10_path, "rb").read(), k_lo10_len, num)

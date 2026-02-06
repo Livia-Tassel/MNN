@@ -42,6 +42,10 @@ def main() -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     rows = []
     totals = {"k_raw": 0.0, "v_raw": 0.0, "k_comp": 0.0, "v_comp": 0.0}
+    global_meta_bytes = 0
+    global_path = os.path.join(args.bitstream_dir, "global_codebook.json")
+    if os.path.exists(global_path):
+        global_meta_bytes = size(global_path)
 
     for meta_path in meta_files:
         meta = load_json(meta_path)
@@ -94,10 +98,16 @@ def main() -> int:
             f.write(",".join(str(r[h]) for h in headers) + "\n")
 
     summary_path = os.path.join(args.out_dir, "huffman_summary.md")
+    if args.include_meta and global_meta_bytes:
+        totals["k_comp"] += global_meta_bytes / 2.0
+        totals["v_comp"] += global_meta_bytes / 2.0
+
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("# Huffman Bitstream Summary\n\n")
         f.write(f"- Dumps analyzed: {len(rows)}\n")
         f.write(f"- Include meta bytes: {bool(args.include_meta)}\n\n")
+        if args.include_meta and global_meta_bytes:
+            f.write(f"- Global codebook bytes: {global_meta_bytes}\n\n")
         f.write(f"- Weighted K ratio: {ratio(totals['k_raw'], totals['k_comp']):.3f}\n")
         f.write(f"- Weighted V ratio: {ratio(totals['v_raw'], totals['v_comp']):.3f}\n")
         f.write(f"- Weighted KV ratio: {ratio(totals['k_raw'] + totals['v_raw'], totals['k_comp'] + totals['v_comp']):.3f}\n")

@@ -22,13 +22,16 @@ exp/gear_fp16/dumps_fp16/<run_id>/
 python3 exp/bitstream/encode_huffman.py \
   --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
   --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1 \
-  --stage both
+  --stage both \
+  --codebook global
 ```
 
 Outputs (per dump):
 - `k_hi6_<meta>.huff`, `k_lo10_<meta>.huff`
 - `v_hi6_<meta>.huff`, `v_lo10_<meta>.huff`
 - `bitstream_meta_<meta>.json` (includes Huffman code lengths)
+Global outputs:
+- `global_codebook.json`
 
 ## Decode + Verify
 ```bash
