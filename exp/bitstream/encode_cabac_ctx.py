@@ -35,7 +35,7 @@ def split_fp16(u16: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def get_group(key_is_k: bool, stage: str) -> str:
-    return f\"{'k' if key_is_k else 'v'}_{stage}\"
+    return f"{'k' if key_is_k else 'v'}_{stage}"
 
 
 def iter_bits(value: int, bits: int) -> Iterator[Tuple[int, int]]:
