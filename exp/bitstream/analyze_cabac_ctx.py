@@ -26,6 +26,23 @@ def ratio(raw: float, comp: float) -> float:
     return raw / comp if comp > 0 else 0.0
 
 
+def infer_stream_files(meta_path: str, meta: Dict) -> Dict[str, str]:
+    """Back-compat: infer stream filenames from meta filename if missing."""
+    needed = ("k_hi6_file", "k_lo10_file", "v_hi6_file", "v_lo10_file")
+    if all(k in meta for k in needed):
+        return {k: meta[k] for k in needed}
+    base = os.path.basename(meta_path)
+    meta_name = base[len("cabac_"):-len(".json")] if base.startswith("cabac_") and base.endswith(".json") else ""
+    if not meta_name:
+        return {}
+    return {
+        "k_hi6_file": meta.get("k_hi6_file", f"k_hi6_{meta_name}.cabac"),
+        "k_lo10_file": meta.get("k_lo10_file", f"k_lo10_{meta_name}.cabac"),
+        "v_hi6_file": meta.get("v_hi6_file", f"v_hi6_{meta_name}.cabac"),
+        "v_lo10_file": meta.get("v_lo10_file", f"v_lo10_{meta_name}.cabac"),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze CABAC context-coded compression ratios.")
     parser.add_argument("--bitstream-dir", required=True)
@@ -60,12 +77,18 @@ def main() -> int:
 
         k_raw = size(k_path)
         v_raw = size(v_path)
-        k_comp = size(os.path.join(os.path.dirname(meta_path), meta["k_hi6_file"])) + size(
-            os.path.join(os.path.dirname(meta_path), meta["k_lo10_file"])
-        )
-        v_comp = size(os.path.join(os.path.dirname(meta_path), meta["v_hi6_file"])) + size(
-            os.path.join(os.path.dirname(meta_path), meta["v_lo10_file"])
-        )
+        streams = infer_stream_files(meta_path, meta)
+        if not streams:
+            continue
+        k_hi6_path = os.path.join(os.path.dirname(meta_path), streams["k_hi6_file"])
+        k_lo10_path = os.path.join(os.path.dirname(meta_path), streams["k_lo10_file"])
+        v_hi6_path = os.path.join(os.path.dirname(meta_path), streams["v_hi6_file"])
+        v_lo10_path = os.path.join(os.path.dirname(meta_path), streams["v_lo10_file"])
+        if not (os.path.exists(k_hi6_path) and os.path.exists(k_lo10_path) and
+                os.path.exists(v_hi6_path) and os.path.exists(v_lo10_path)):
+            continue
+        k_comp = size(k_hi6_path) + size(k_lo10_path)
+        v_comp = size(v_hi6_path) + size(v_lo10_path)
         if args.include_meta:
             k_comp += size(meta_path) / 2.0
             v_comp += size(meta_path) / 2.0
