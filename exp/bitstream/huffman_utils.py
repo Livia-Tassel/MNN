@@ -24,7 +24,7 @@ def build_huffman_code_lengths(freqs: List[int]) -> List[int]:
         node = (f1 + f2, -1, (f1, s1, l1, r1), (f2, s2, l2, r2))
         heapq.heappush(heap, node)
 
-    _, _, left, right = heap[0]
+    root = heap[0]
     lengths = [0] * n
 
     def walk(node, depth):
@@ -35,8 +35,7 @@ def build_huffman_code_lengths(freqs: List[int]) -> List[int]:
         walk(l, depth + 1)
         walk(r, depth + 1)
 
-    walk(left, 0)
-    walk(right, 0)
+    walk(root, 0)
     return lengths
 
 
