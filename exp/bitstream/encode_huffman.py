@@ -88,7 +88,8 @@ def main() -> int:
         rel_dir = os.path.relpath(dirpath, args.dump_dir)
         dst_dir = os.path.join(args.out_dir, rel_dir)
         os.makedirs(dst_dir, exist_ok=True)
-        dst_meta_path = os.path.join(dst_dir, "bitstream_meta.json")
+        meta_name = os.path.splitext(os.path.basename(meta_path))[0]
+        dst_meta_path = os.path.join(dst_dir, f"bitstream_{meta_name}.json")
 
         if not args.overwrite and os.path.exists(dst_meta_path):
             skipped += 1
@@ -116,10 +117,10 @@ def main() -> int:
             v_hi6_bs = encode_symbols(v_hi6.tolist(), v_hi6_len)
             v_lo10_bs = encode_symbols(v_lo10.tolist(), v_lo10_len)
 
-            k_hi6_path = os.path.join(dst_dir, "k_hi6.huff")
-            k_lo10_path = os.path.join(dst_dir, "k_lo10.huff")
-            v_hi6_path = os.path.join(dst_dir, "v_hi6.huff")
-            v_lo10_path = os.path.join(dst_dir, "v_lo10.huff")
+            k_hi6_path = os.path.join(dst_dir, f"k_hi6_{meta_name}.huff")
+            k_lo10_path = os.path.join(dst_dir, f"k_lo10_{meta_name}.huff")
+            v_hi6_path = os.path.join(dst_dir, f"v_hi6_{meta_name}.huff")
+            v_lo10_path = os.path.join(dst_dir, f"v_lo10_{meta_name}.huff")
 
             with open(k_hi6_path, "wb") as f:
                 f.write(k_hi6_bs)

@@ -26,9 +26,9 @@ python3 exp/bitstream/encode_huffman.py \
 ```
 
 Outputs (per dump):
-- `k_hi6.huff`, `k_lo10.huff`
-- `v_hi6.huff`, `v_lo10.huff`
-- `bitstream_meta.json` (includes Huffman code lengths)
+- `k_hi6_<meta>.huff`, `k_lo10_<meta>.huff`
+- `v_hi6_<meta>.huff`, `v_lo10_<meta>.huff`
+- `bitstream_meta_<meta>.json` (includes Huffman code lengths)
 
 ## Decode + Verify
 ```bash

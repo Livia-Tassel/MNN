@@ -13,7 +13,7 @@ from huffman_utils import decode_symbols
 def iter_meta_files(root: str) -> Iterator[str]:
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
-            if name == "bitstream_meta.json":
+            if name.startswith("bitstream_meta_") and name.endswith(".json"):
                 yield os.path.join(dirpath, name)
 
 
