@@ -46,26 +46,26 @@ def iter_bits(value: int, bits: int) -> Iterator[Tuple[int, int]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=\"CABAC-like binary arithmetic coding with context (lossless).\" )
-    parser.add_argument(\"--dump-dir\", required=True)
-    parser.add_argument(\"--out-dir\", default=\"exp/bitstream/out\")
-    parser.add_argument(\"--stage\", choices=[\"prefill\", \"decode\", \"both\"], default=\"both\")
-    parser.add_argument(\"--min-seq-len\", type=int, default=0)
-    parser.add_argument(\"--max-seq-len\", type=int, default=0)
-    parser.add_argument(\"--hi6-buckets\", type=int, default=512)
-    parser.add_argument(\"--lo10-buckets\", type=int, default=16384)
-    parser.add_argument(\"--hash-a\", type=int, default=131)
-    parser.add_argument(\"--hash-b\", type=int, default=17)
-    parser.add_argument(\"--hash-c\", type=int, default=257)
-    parser.add_argument(\"--hash-d\", type=int, default=31)
-    parser.add_argument(\"--prefix-bits\", type=int, default=3)
-    parser.add_argument(\"--rescale-threshold\", type=int, default=1 << 15)
-    parser.add_argument(\"--overwrite\", action=\"store_true\")
+    parser = argparse.ArgumentParser(description="CABAC-like binary arithmetic coding with context (lossless)." )
+    parser.add_argument("--dump-dir", required=True)
+    parser.add_argument("--out-dir", default="exp/bitstream/out")
+    parser.add_argument("--stage", choices=["prefill", "decode", "both"], default="both")
+    parser.add_argument("--min-seq-len", type=int, default=0)
+    parser.add_argument("--max-seq-len", type=int, default=0)
+    parser.add_argument("--hi6-buckets", type=int, default=512)
+    parser.add_argument("--lo10-buckets", type=int, default=16384)
+    parser.add_argument("--hash-a", type=int, default=131)
+    parser.add_argument("--hash-b", type=int, default=17)
+    parser.add_argument("--hash-c", type=int, default=257)
+    parser.add_argument("--hash-d", type=int, default=31)
+    parser.add_argument("--prefix-bits", type=int, default=3)
+    parser.add_argument("--rescale-threshold", type=int, default=1 << 15)
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     meta_files = list(iter_meta_files(args.dump_dir))
     if not meta_files:
-        print(f\"No meta_*.json found under {args.dump_dir}\", file=sys.stderr)
+        print(f"No meta_*.json found under {args.dump_dir}", file=sys.stderr)
         return 1
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -75,7 +75,7 @@ def main() -> int:
     group_hi6_counts = {}
     group_lo10_counts = {}
     for key_is_k in (True, False):
-        for stage in (\"prefill\", \"decode\"):
+        for stage in ("prefill", "decode"):
             group = get_group(key_is_k, stage)
             group_hi6_counts[group] = ([1] * args.hi6_buckets, [1] * args.hi6_buckets)
             group_lo10_counts[group] = ([1] * args.lo10_buckets, [1] * args.lo10_buckets)
@@ -85,27 +85,27 @@ def main() -> int:
             meta = load_json(meta_path)
         except Exception:
             continue
-        stage = meta.get(\"stage\", \"unknown\")
-        if args.stage != \"both\" and stage != args.stage:
+        stage = meta.get("stage", "unknown")
+        if args.stage != "both" and stage != args.stage:
             continue
-        if stage not in (\"prefill\", \"decode\"):
+        if stage not in ("prefill", "decode"):
             continue
-        seq_len = int(meta.get(\"seq_len\", 0))
+        seq_len = int(meta.get("seq_len", 0))
         if args.min_seq_len and seq_len < args.min_seq_len:
             continue
         if args.max_seq_len and seq_len > args.max_seq_len:
             continue
-        if int(meta.get(\"bytes_per_elem\", 0)) != 2:
+        if int(meta.get("bytes_per_elem", 0)) != 2:
             continue
 
         dirpath = os.path.dirname(meta_path)
-        k_path = os.path.join(dirpath, meta.get(\"k_file\", \"\"))
-        v_path = os.path.join(dirpath, meta.get(\"v_file\", \"\"))
+        k_path = os.path.join(dirpath, meta.get("k_file", ""))
+        v_path = os.path.join(dirpath, meta.get("v_file", ""))
         if not os.path.exists(k_path) or not os.path.exists(v_path):
             continue
 
-        k = np.frombuffer(open(k_path, \"rb\").read(), dtype=np.uint16)
-        v = np.frombuffer(open(v_path, \"rb\").read(), dtype=np.uint16)
+        k = np.frombuffer(open(k_path, "rb").read(), dtype=np.uint16)
+        v = np.frombuffer(open(v_path, "rb").read(), dtype=np.uint16)
         k_hi6, k_lo10 = split_fp16(k)
         v_hi6, v_lo10 = split_fp16(v)
 
@@ -147,20 +147,20 @@ def main() -> int:
     for group in group_hi6_counts:
         hi0, hi1 = group_hi6_counts[group]
         lo0, lo1 = group_lo10_counts[group]
-        write_json(os.path.join(args.out_dir, f\"cabac_codebook_{group}.json\"), {
-            \"group\": group,
-            \"hi6_buckets\": args.hi6_buckets,
-            \"lo10_buckets\": args.lo10_buckets,
-            \"hash_a\": args.hash_a,
-            \"hash_b\": args.hash_b,
-            \"hash_c\": args.hash_c,
-            \"hash_d\": args.hash_d,
-            \"prefix_bits\": args.prefix_bits,
-            \"rescale_threshold\": args.rescale_threshold,
-            \"hi6_count0\": hi0,
-            \"hi6_count1\": hi1,
-            \"lo10_count0\": lo0,
-            \"lo10_count1\": lo1,
+        write_json(os.path.join(args.out_dir, f"cabac_codebook_{group}.json"), {
+            "group": group,
+            "hi6_buckets": args.hi6_buckets,
+            "lo10_buckets": args.lo10_buckets,
+            "hash_a": args.hash_a,
+            "hash_b": args.hash_b,
+            "hash_c": args.hash_c,
+            "hash_d": args.hash_d,
+            "prefix_bits": args.prefix_bits,
+            "rescale_threshold": args.rescale_threshold,
+            "hi6_count0": hi0,
+            "hi6_count1": hi1,
+            "lo10_count0": lo0,
+            "lo10_count1": lo1,
         })
 
     # Encode with adaptive models seeded by priors
@@ -171,30 +171,30 @@ def main() -> int:
         try:
             meta = load_json(meta_path)
         except Exception as exc:
-            print(f\"Skip {meta_path}: {exc}\", file=sys.stderr)
+            print(f"Skip {meta_path}: {exc}", file=sys.stderr)
             errors += 1
             continue
-        stage = meta.get(\"stage\", \"unknown\")
-        if args.stage != \"both\" and stage != args.stage:
+        stage = meta.get("stage", "unknown")
+        if args.stage != "both" and stage != args.stage:
             skipped += 1
             continue
-        if stage not in (\"prefill\", \"decode\"):
+        if stage not in ("prefill", "decode"):
             skipped += 1
             continue
-        seq_len = int(meta.get(\"seq_len\", 0))
+        seq_len = int(meta.get("seq_len", 0))
         if args.min_seq_len and seq_len < args.min_seq_len:
             skipped += 1
             continue
         if args.max_seq_len and seq_len > args.max_seq_len:
             skipped += 1
             continue
-        if int(meta.get(\"bytes_per_elem\", 0)) != 2:
+        if int(meta.get("bytes_per_elem", 0)) != 2:
             skipped += 1
             continue
 
         dirpath = os.path.dirname(meta_path)
-        k_path = os.path.join(dirpath, meta.get(\"k_file\", \"\"))
-        v_path = os.path.join(dirpath, meta.get(\"v_file\", \"\"))
+        k_path = os.path.join(dirpath, meta.get("k_file", ""))
+        v_path = os.path.join(dirpath, meta.get("v_file", ""))
         if not os.path.exists(k_path) or not os.path.exists(v_path):
             skipped += 1
             continue
@@ -203,14 +203,14 @@ def main() -> int:
         dst_dir = os.path.join(args.out_dir, rel_dir)
         os.makedirs(dst_dir, exist_ok=True)
         meta_name = os.path.splitext(os.path.basename(meta_path))[0]
-        dst_meta_path = os.path.join(dst_dir, f\"cabac_{meta_name}.json\")
+        dst_meta_path = os.path.join(dst_dir, f"cabac_{meta_name}.json")
         if not args.overwrite and os.path.exists(dst_meta_path):
             skipped += 1
             continue
 
         try:
-            k = np.frombuffer(open(k_path, \"rb\").read(), dtype=np.uint16)
-            v = np.frombuffer(open(v_path, \"rb\").read(), dtype=np.uint16)
+            k = np.frombuffer(open(k_path, "rb").read(), dtype=np.uint16)
+            v = np.frombuffer(open(v_path, "rb").read(), dtype=np.uint16)
             k_hi6, k_lo10 = split_fp16(k)
             v_hi6, v_lo10 = split_fp16(v)
 
@@ -253,11 +253,11 @@ def main() -> int:
                 prev_hi6 = cur_hi6
                 prev_lo10 = cur_lo10
 
-            k_hi6_path = os.path.join(dst_dir, f\"k_hi6_{meta_name}.cabac\")
-            k_lo10_path = os.path.join(dst_dir, f\"k_lo10_{meta_name}.cabac\")
-            with open(k_hi6_path, \"wb\") as f:
+            k_hi6_path = os.path.join(dst_dir, f"k_hi6_{meta_name}.cabac")
+            k_lo10_path = os.path.join(dst_dir, f"k_lo10_{meta_name}.cabac")
+            with open(k_hi6_path, "wb") as f:
                 f.write(hi6_enc.finish())
-            with open(k_lo10_path, \"wb\") as f:
+            with open(k_lo10_path, "wb") as f:
                 f.write(lo10_enc.finish())
 
             # V stream
@@ -291,46 +291,46 @@ def main() -> int:
                 prev_hi6 = cur_hi6
                 prev_lo10 = cur_lo10
 
-            v_hi6_path = os.path.join(dst_dir, f\"v_hi6_{meta_name}.cabac\")
-            v_lo10_path = os.path.join(dst_dir, f\"v_lo10_{meta_name}.cabac\")
-            with open(v_hi6_path, \"wb\") as f:
+            v_hi6_path = os.path.join(dst_dir, f"v_hi6_{meta_name}.cabac")
+            v_lo10_path = os.path.join(dst_dir, f"v_lo10_{meta_name}.cabac")
+            with open(v_hi6_path, "wb") as f:
                 f.write(hi6_enc.finish())
-            with open(v_lo10_path, \"wb\") as f:
+            with open(v_lo10_path, "wb") as f:
                 f.write(lo10_enc.finish())
 
             out_meta = dict(meta)
             out_meta.update({
-                \"layout\": \"bitstream_cabac_ctx\",
-                \"bytes_per_elem\": 2,
-                \"k_group\": k_group,
-                \"v_group\": v_group,
-                \"hi6_buckets\": args.hi6_buckets,
-                \"lo10_buckets\": args.lo10_buckets,
-                \"hash_a\": args.hash_a,
-                \"hash_b\": args.hash_b,
-                \"hash_c\": args.hash_c,
-                \"hash_d\": args.hash_d,
-                \"prefix_bits\": args.prefix_bits,
-                \"rescale_threshold\": args.rescale_threshold,
-                \"k_hi6_file\": os.path.basename(k_hi6_path),
-                \"k_lo10_file\": os.path.basename(k_lo10_path),
-                \"v_hi6_file\": os.path.basename(v_hi6_path),
-                \"v_lo10_file\": os.path.basename(v_lo10_path),
-                \"num_elements\": int(k.size),
+                "layout": "bitstream_cabac_ctx",
+                "bytes_per_elem": 2,
+                "k_group": k_group,
+                "v_group": v_group,
+                "hi6_buckets": args.hi6_buckets,
+                "lo10_buckets": args.lo10_buckets,
+                "hash_a": args.hash_a,
+                "hash_b": args.hash_b,
+                "hash_c": args.hash_c,
+                "hash_d": args.hash_d,
+                "prefix_bits": args.prefix_bits,
+                "rescale_threshold": args.rescale_threshold,
+                "k_hi6_file": os.path.basename(k_hi6_path),
+                "k_lo10_file": os.path.basename(k_lo10_path),
+                "v_hi6_file": os.path.basename(v_hi6_path),
+                "v_lo10_file": os.path.basename(v_lo10_path),
+                "num_elements": int(k.size),
             })
             write_json(dst_meta_path, out_meta)
             encoded += 1
         except Exception as exc:
-            print(f\"Error {meta_path}: {exc}\", file=sys.stderr)
+            print(f"Error {meta_path}: {exc}", file=sys.stderr)
             errors += 1
 
-    print(f\"Encoded: {encoded}\")
-    print(f\"Skipped: {skipped}\")
+    print(f"Encoded: {encoded}")
+    print(f"Skipped: {skipped}")
     if errors:
-        print(f\"Errors: {errors}\", file=sys.stderr)
+        print(f"Errors: {errors}", file=sys.stderr)
         return 2
     return 0
 
 
-if __name__ == \"__main__\":
+if __name__ == "__main__":
     raise SystemExit(main())
