@@ -13,6 +13,28 @@ This file summarizes the current experimental progress for KV cache compression 
 - `exp/n_lossless`: Mixed compression (lossless first N layers + lossy remainder).
 - `exp/bitstream`: Lossless bitstream encoders (Huffman, Arithmetic, rANS, CABAC).
 
+## Tooling and Pipelines (exp/)
+- `exp/distribution` tooling:
+- `analyze_distribution.py` computes per-layer entropy and compression ratios (zstd, gear for FP16 / split16 for FP32), supports stage and seq-len filters, and optional inverse-RoPE comparison.
+- `analyze_packed.py` validates packed-layout dumps via `packed_meta_*.json` and reports packed-layer ratios plus pack metadata.
+- Output artifacts: `layer_metrics.csv`, `summary.md`, `packed_layer_metrics.csv`, `packed_summary.md`.
+- `exp/gear_fp16` pipeline:
+- `gen_prompts.py` builds prompt sets from corpus with tokenizer selection (`MNN`/`HF`/`approx`), target token lengths, and JSONL formats.
+- `run_llm_demo_batch.py` runs `llm_demo` over prompt files, writes KV dumps, and logs token counts to `llm_demo_runs.jsonl`.
+- `convert_fp16.py` converts FP32 dumps to FP16 (optional `--allow-fp16`, `--overwrite`).
+- `analyze_fp16.py` reports per-layer and per-head metrics for zstd, gear split, and gear+delta, plus weighted and prompt-length-grouped summaries.
+- `run_pipeline.py` orchestrates prompt gen -> demo -> conversion -> analysis in one shot.
+- `verify_roundtrip.py` validates gear+delta encode/decode correctness offline.
+- `bench_latency.py` benchmarks encode/decode latency offline.
+- `exp/n_lossless` evaluators:
+- `analyze_mixed.py` evaluates lossless first N layers + lossy tail (truncate or uniform quant), with gear/gear-delta/zstd compression and error metrics (MAE/RMSE/max/cosine).
+- `analyze_blocknorm.py` implements block normalization + top-k partial de-normalization with configurable scale precision.
+- `sweep_blocknorm.py` grid-searches block size/top-k/bits with cosine/MAE constraints.
+- `analyze_lossy_compare.py` compares quant vs clip vs clip+quant (percentile/sigma clipping) and outputs summaries.
+- `exp/bitstream` codecs:
+- Huffman / Arithmetic (global codebooks), rANS context (hashed buckets), and CABAC context (adaptive) for FP16 hi6/lo10 streams.
+- Each codec has encode/decode/verify scripts plus ratio analysis with optional metadata inclusion.
+
 ## Key Findings
 - **KV dump type**: Real dumps were FP32 (`bytes_per_elem=4`) even when expecting FP16; FP16 is created offline.
 - **RoPE inverse**: Inverse-RoPE does not improve compressibility. Observed K inverse-RoPE zstd ~1.074 vs baseline ~1.075, and mean abs diff ~0.709. Keeping native KV layout is necessary.
