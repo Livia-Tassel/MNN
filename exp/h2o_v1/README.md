@@ -26,6 +26,9 @@ Put these keys in your model config (or let scripts generate merged configs):
 ```
 
 ## Quick start
+`run_h2o_bench.py` will auto-set `base_dir` to the directory of `--base-config`,
+so model-relative files (`llm.mnn`, `llm.mnn.weight`, `tokenizer.txt`, etc.) still resolve correctly.
+
 1. Run a sweep:
 
 ```bash
@@ -70,4 +73,3 @@ python3 exp/h2o_v1/sweep_h2o.py \
   --preset exp/h2o_v1/configs/small.json \
   --out-dir exp/h2o_v1/out_small
 ```
-

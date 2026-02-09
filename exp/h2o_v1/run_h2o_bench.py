@@ -16,6 +16,23 @@ def run_cmd(cmd):
     return subprocess.run(cmd, check=False).returncode
 
 
+def normalize_base_dir(base_cfg, base_config_path):
+    model_cfg_dir = Path(base_config_path).resolve().parent
+    raw_base_dir = base_cfg.get("base_dir", "")
+    if isinstance(raw_base_dir, str) and raw_base_dir:
+        base_dir_path = Path(raw_base_dir)
+        if not base_dir_path.is_absolute():
+            base_dir_path = (model_cfg_dir / base_dir_path).resolve()
+        else:
+            base_dir_path = base_dir_path.resolve()
+    else:
+        base_dir_path = model_cfg_dir
+    base_dir = os.fspath(base_dir_path)
+    if not base_dir.endswith(("/", "\\")):
+        base_dir += "/"
+    return base_dir
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_bench sweeps for H2O v1.")
     parser.add_argument("--llm-bench", required=True, help="Path to llm_bench binary.")
@@ -48,6 +65,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     base_cfg = json.loads(Path(args.base_config).read_text(encoding="utf-8"))
+    normalized_base_dir = normalize_base_dir(base_cfg, args.base_config)
     prompts = parse_list(args.prompts, int)
     gens = parse_list(args.gens, int)
     keep_ratios = parse_list(args.h2o_keep_ratios, float)
@@ -59,6 +77,7 @@ def main():
     trigger_mins = parse_list(args.h2o_trigger_min_tokens, int)
 
     manifest = []
+    any_fail = False
     run_idx = 0
     for combo in itertools.product(
         prompts,
@@ -80,6 +99,7 @@ def main():
         cfg = dict(base_cfg)
         cfg.update(
             {
+                "base_dir": normalized_base_dir,
                 "kv_h2o_enable": True,
                 "kv_h2o_block_tokens": int(block),
                 "kv_h2o_sink_tokens": int(sink),
@@ -120,6 +140,9 @@ def main():
         rc = 0
         if not args.dry_run:
             rc = run_cmd(cmd)
+            if rc != 0:
+                any_fail = True
+                print(f"[WARN] {run_id} failed with return code {rc}")
         manifest.append(
             {
                 "run_id": run_id,
@@ -140,8 +163,9 @@ def main():
 
     (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=True, indent=2), encoding="utf-8")
     print(f"Wrote manifest: {out_dir / 'manifest.json'}")
+    if any_fail:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
     main()
-
