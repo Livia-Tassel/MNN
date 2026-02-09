@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -91,6 +92,14 @@ struct LlmContext {
     std::vector<int> history_tokens;
     std::vector<int> output_tokens;
     std::string generate_str;
+    // h2o / kv compression stats
+    float h2o_keep_ratio = 1.0f;
+    float h2o_lossy_ratio = 1.0f;
+    float h2o_lossless_ratio = 1.0f;
+    int64_t h2o_evict_us = 0;
+    int64_t h2o_codec_us = 0;
+    int h2o_last_evict_tokens = 0;
+    int h2o_total_evict_tokens = 0;
     // llm status
     LlmStatus status;
 };

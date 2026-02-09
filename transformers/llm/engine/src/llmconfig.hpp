@@ -450,6 +450,39 @@ public:
     bool kvcache_mmap() const {
         return config_.value("kvcache_mmap", false);
     }
+    bool kv_h2o_enable() const {
+        return config_.value("kv_h2o_enable", false);
+    }
+    int kv_h2o_block_tokens() const {
+        return config_.value("kv_h2o_block_tokens", 64);
+    }
+    int kv_h2o_sink_tokens() const {
+        return config_.value("kv_h2o_sink_tokens", 32);
+    }
+    int kv_h2o_recent_tokens() const {
+        return config_.value("kv_h2o_recent_tokens", 256);
+    }
+    float kv_h2o_target_keep_ratio() const {
+        return config_.value("kv_h2o_target_keep_ratio", 0.50f);
+    }
+    float kv_h2o_ema_alpha() const {
+        return config_.value("kv_h2o_ema_alpha", 0.90f);
+    }
+    int kv_h2o_update_interval() const {
+        return config_.value("kv_h2o_update_interval", 16);
+    }
+    int kv_h2o_trigger_min_tokens() const {
+        return config_.value("kv_h2o_trigger_min_tokens", 512);
+    }
+    bool kv_h2o_log_stats() const {
+        return config_.value("kv_h2o_log_stats", false);
+    }
+    bool kv_lossless_enable() const {
+        return config_.value("kv_lossless_enable", false);
+    }
+    std::string kv_lossless_codec() const {
+        return config_.value("kv_lossless_codec", "none");
+    }
     std::string tmp_path() const {
         return config_.value("tmp_path", "");
     }

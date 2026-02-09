@@ -175,6 +175,11 @@ struct TestInstance {
     std::vector<int64_t>     decodeUs;
     std::vector<int64_t>     samplesUs;
     std::vector<double>      loadingS;
+    std::vector<double>      h2oKeep;
+    std::vector<double>      h2oLossy;
+    std::vector<double>      h2oLossless;
+    std::vector<double>      h2oEvictUs;
+    std::vector<double>      h2oCodecUs;
     int                      backend;
     int                      precision;
     int                      power;
@@ -218,7 +223,12 @@ struct TestInstance {
         if (field == "useMmap") {
             return BOOL;
         }
-        if (field == "t/s" || field == "modelSize" || field == "prefill&decode speed (tok/s)") {
+        if (field == "t/s" || field == "modelSize" || field == "prefill&decode speed (tok/s)"
+            || field == "h2o_keep"
+            || field == "h2o_lossy"
+            || field == "h2o_lossless"
+            || field == "h2o_evict_us"
+            || field == "h2o_codec_us") {
             return FLOAT;
         }
         return STRING;
@@ -337,6 +347,11 @@ struct markdownPrinter : public Printer {
         } else {
             fields.emplace_back("llm_demo");
             fields.emplace_back("speed(tok/s)");
+            fields.emplace_back("h2o_keep");
+            fields.emplace_back("h2o_lossy");
+            fields.emplace_back("h2o_lossless");
+            fields.emplace_back("h2o_evict_us");
+            fields.emplace_back("h2o_codec_us");
         }
         if (tp.loadTime == "true") {
             fields.emplace_back("loadingTime(s)");
@@ -393,6 +408,21 @@ struct markdownPrinter : public Printer {
                 auto decode_speed = t.getTokensPerSecond(t.nGenerate, t.decodeUs);
                 auto prefill_speed = t.getTokensPerSecond(t.nPrompt, t.prefillUs);
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f<br>%.2f ± %.2f", t.getAvgUs(prefill_speed), t.getStdevUs(prefill_speed), t.getAvgUs(decode_speed), t.getStdevUs(decode_speed));
+                value = buf;
+            } else if (field == "h2o_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oKeep), t.getStdevUs(t.h2oKeep));
+                value = buf;
+            } else if (field == "h2o_lossy") {
+                snprintf(buf, sizeof(buf), "%.3f ± %.3f", t.getAvgUs(t.h2oLossy), t.getStdevUs(t.h2oLossy));
+                value = buf;
+            } else if (field == "h2o_lossless") {
+                snprintf(buf, sizeof(buf), "%.3f ± %.3f", t.getAvgUs(t.h2oLossless), t.getStdevUs(t.h2oLossless));
+                value = buf;
+            } else if (field == "h2o_evict_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oEvictUs), t.getStdevUs(t.h2oEvictUs));
+                value = buf;
+            } else if (field == "h2o_codec_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oCodecUs), t.getStdevUs(t.h2oCodecUs));
                 value = buf;
             } else if (field == "precision") {
                 if (t.precision == 2) value = "Low";
@@ -572,6 +602,36 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.loadingS));
                 writer.Key("loading_time_std");
                 writer.Double(inst.getStdevUs(inst.loadingS));
+            }
+            if (!inst.h2oKeep.empty()) {
+                writer.Key("h2o_keep_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oKeep));
+                writer.Key("h2o_keep_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oKeep));
+            }
+            if (!inst.h2oLossy.empty()) {
+                writer.Key("h2o_lossy_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oLossy));
+                writer.Key("h2o_lossy_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oLossy));
+            }
+            if (!inst.h2oLossless.empty()) {
+                writer.Key("h2o_lossless_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oLossless));
+                writer.Key("h2o_lossless_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oLossless));
+            }
+            if (!inst.h2oEvictUs.empty()) {
+                writer.Key("h2o_evict_us");
+                writer.Double(inst.getAvgUs(inst.h2oEvictUs));
+                writer.Key("h2o_evict_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oEvictUs));
+            }
+            if (!inst.h2oCodecUs.empty()) {
+                writer.Key("h2o_codec_us");
+                writer.Double(inst.getAvgUs(inst.h2oCodecUs));
+                writer.Key("h2o_codec_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oCodecUs));
             }
 
             writer.EndObject();
@@ -1202,6 +1262,11 @@ int main(int argc, char ** argv) {
                 if (i > 0) { // Exclude the first performance value.
                     t.prefillUs.push_back(prefillTime);
                     t.decodeUs.push_back(decodeTime);
+                    t.h2oKeep.push_back(context->h2o_keep_ratio);
+                    t.h2oLossy.push_back(context->h2o_lossy_ratio);
+                    t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oEvictUs.push_back((double)context->h2o_evict_us);
+                    t.h2oCodecUs.push_back((double)context->h2o_codec_us);
                 }
             }
             if (printHeader) {
@@ -1231,6 +1296,11 @@ int main(int argc, char ** argv) {
                 }
                 if (i > 0) {
                     t.samplesUs.push_back(sampler_us);
+                    t.h2oKeep.push_back(context->h2o_keep_ratio);
+                    t.h2oLossy.push_back(context->h2o_lossy_ratio);
+                    t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oEvictUs.push_back((double)context->h2o_evict_us);
+                    t.h2oCodecUs.push_back((double)context->h2o_codec_us);
                 }
             }
 

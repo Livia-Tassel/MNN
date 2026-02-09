@@ -1,0 +1,16 @@
+{
+  "prompts": [512, 2048],
+  "gens": [128],
+  "repeat": 3,
+  "h2o_keep_ratios": [0.4, 0.5, 0.6],
+  "h2o_block_tokens": [64, 128],
+  "h2o_sink_tokens": [16, 32],
+  "h2o_recent_tokens": [128, 256],
+  "h2o_ema_alphas": [0.85, 0.9],
+  "h2o_update_intervals": [8, 16],
+  "h2o_trigger_min_tokens": [512],
+  "h2o_log_stats": false,
+  "kv_lossless_enable": false,
+  "kv_lossless_codec": "none"
+}
+

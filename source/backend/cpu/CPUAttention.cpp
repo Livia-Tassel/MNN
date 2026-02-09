@@ -8,6 +8,10 @@
 
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <mutex>
 #include <limits>
 #include "CPUAttention.hpp"
 #include "CPUBackend.hpp"
@@ -334,7 +338,20 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     int insertLen = seqLen;
 
     if (mKVCache && mMeta != nullptr) {
-        if (mMeta->previous == mMeta->remove) {
+        // Apply previous-step H2O compact plan before touching KV cache in this step.
+        if (mMeta->h2o_pending_plan_ready != 0
+            && mMeta->remove == 0
+            && mMeta->n_reserve == 0
+            && mMeta->previous >= mMeta->h2o_pending_remove) {
+            mMeta->remove = mMeta->h2o_pending_remove;
+            mMeta->reserve = mMeta->h2o_pending_reserve;
+            mMeta->n_reserve = mMeta->h2o_pending_n_reserve;
+            mMeta->h2o_pending_plan_ready = 0;
+            mMeta->h2o_pending_remove = 0;
+            mMeta->h2o_pending_reserve = nullptr;
+            mMeta->h2o_pending_n_reserve = 0;
+        }
+        if (mMeta->previous == mMeta->remove && mMeta->n_reserve == 0) {
             mKVCacheManager->onClear();
             mKVCacheManager->onAlloc(mMeta, seqLen);
         } else {
@@ -364,6 +381,22 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     int32_t units[2] = {eP, lP};
     const float* sinksPtr = sinks ? sinks->host<float>() : nullptr;
     int kvValidOffset = kvSeqLen - seqLen; // reuse_kv=true or decode, kvValidOffset>0
+
+    const bool h2oEnabled = mKVCache
+        && mMeta != nullptr
+        && mMeta->h2o_enable != 0
+        && mMeta->h2o_in_decode != 0
+        && !mQuantKey
+        && !mQuantValue
+        && seqLen > 0
+        && kvSeqLen > 0;
+    const int h2oBlockTokens = h2oEnabled ? ALIMAX(1, mMeta->h2o_block_tokens) : 1;
+    const int h2oBlockCount = h2oEnabled ? UP_DIV(kvSeqLen, h2oBlockTokens) : 0;
+    std::vector<float> h2oBlockAcc;
+    std::mutex h2oBlockLock;
+    if (h2oEnabled && h2oBlockCount > 0) {
+        h2oBlockAcc.resize(h2oBlockCount, 0.0f);
+    }
 
     // Temporary tensors for intermediate results
     std::shared_ptr<Tensor> unpackQK(Tensor::createDevice<int32_t>({mThreadNum, seqLen, mBlockKV}));
@@ -494,7 +527,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
     }
 
-    std::function<void(int)> mCompute = [=](int tId) {
+    std::function<void(int)> mCompute = [=, &h2oBlockAcc, &h2oBlockLock](int tId) {
         int8_t* qReordered = nullptr;
         auto qkPacked     = mTempQKBlock->host<int8_t>() + tId * mTempQKBlock->stride(0);
         auto qkFlatten   = unpackQK->host<float>() + tId * unpackQK->stride(0);
@@ -509,6 +542,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         auto runningSum = mRunningSum ? (float*)(mRunningSum->host<int8_t>() + tId * mRunningSum->stride(0)) : nullptr;
         auto diffScale = mExpfDiffMax ? (float*)(mExpfDiffMax->host<int8_t>() + tId * mExpfDiffMax->stride(0)) : nullptr;
         auto outputPacked = mTempOut ? mTempOut->host<int8_t>() + tId * mTempOut->stride(0) : qkvPacked;
+        std::vector<float> localBlockAcc;
+        if (h2oEnabled && h2oBlockCount > 0) {
+            localBlockAcc.resize(h2oBlockCount, 0.0f);
+        }
         
         int  kvBlocks = UP_DIV(kvSeqLen, mBlockKV);
 
@@ -698,6 +735,19 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         }
                     }
                     gcore->MNNSoftmax(qkSoftmax, (float*)qkPacked, runningMax, runningSum, diffScale, seqLen, subKvSeqLen, i * mBlockKV, kvValidOffset, mPack, useMaskInSoftmax);
+                    if (h2oEnabled && h2oBlockCount > 0) {
+                        const int softStride = ROUND_UP(subKvSeqLen, mPack);
+                        for (int q = 0; q < seqLen; ++q) {
+                            auto row = qkSoftmax + q * softStride;
+                            for (int k = 0; k < subKvSeqLen; ++k) {
+                                const int globalToken = i * mBlockKV + k;
+                                const int blockIndex = globalToken / h2oBlockTokens;
+                                if (blockIndex >= 0 && blockIndex < h2oBlockCount) {
+                                    localBlockAcc[blockIndex] += row[k];
+                                }
+                            }
+                        }
+                    }
                 }
                 // 3. qk @ v
                 auto qkStride0 = ROUND_UP(subKvSeqLen, lP) * eP * mBytes;
@@ -776,12 +826,159 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             // offset = {seqLen, mNumHead * mHeadDim};
             gcore->MNNUnpackCUnitTranspose((float*)dstPtr, (float*)outputPacked, seqLen, mHeadDim, offset);
         }
+        if (h2oEnabled && h2oBlockCount > 0) {
+            std::lock_guard<std::mutex> guard(h2oBlockLock);
+            for (int i = 0; i < h2oBlockCount; ++i) {
+                h2oBlockAcc[i] += localBlockAcc[i];
+            }
+        }
     };
 
     MNN_CONCURRENCY_BEGIN(tId, mThreadNum) {
         mCompute((int)tId);
     }
     MNN_CONCURRENCY_END();
+
+    if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && mH2OState != nullptr) {
+        if ((int)mH2OState->blockScores.size() != h2oBlockCount) {
+            mH2OState->blockScores.resize(h2oBlockCount, 0.0f);
+        }
+
+        const float alpha = ALIMIN(1.0f, ALIMAX(0.0f, mMeta->h2o_ema_alpha));
+        const float norm = (float)ALIMAX(1, mNumHead * seqLen);
+        for (int i = 0; i < h2oBlockCount; ++i) {
+            const float current = h2oBlockAcc[i] / norm;
+            mH2OState->blockScores[i] = alpha * mH2OState->blockScores[i] + (1.0f - alpha) * current;
+        }
+        mH2OState->step += 1;
+
+        const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
+        const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
+        const bool shouldTrigger = kvSeqLen >= triggerMin
+            && (mH2OState->step - mH2OState->lastTriggerStep >= updateInterval);
+
+        mMeta->h2o_last_evict_tokens = 0;
+        mMeta->h2o_evict_us = 0;
+        mMeta->h2o_codec_us = 0;
+        if (shouldTrigger) {
+            mH2OState->lastTriggerStep = mH2OState->step;
+            auto t0 = std::chrono::high_resolution_clock::now();
+
+            std::vector<char> keepBlock(h2oBlockCount, 0);
+            const int sinkTokens = ALIMAX(0, mMeta->h2o_sink_tokens);
+            const int recentTokens = ALIMAX(0, mMeta->h2o_recent_tokens);
+            const int recentStartToken = ALIMAX(0, kvSeqLen - recentTokens);
+            const int sinkEndToken = ALIMIN(kvSeqLen, sinkTokens);
+
+            auto blockTokenSize = [=](int blockIndex) {
+                const int start = blockIndex * h2oBlockTokens;
+                const int end = ALIMIN(kvSeqLen, start + h2oBlockTokens);
+                return ALIMAX(0, end - start);
+            };
+
+            for (int token = 0; token < sinkEndToken; token += h2oBlockTokens) {
+                keepBlock[token / h2oBlockTokens] = 1;
+            }
+            for (int block = recentStartToken / h2oBlockTokens; block < h2oBlockCount; ++block) {
+                keepBlock[block] = 1;
+            }
+
+            int keptTokens = 0;
+            for (int i = 0; i < h2oBlockCount; ++i) {
+                if (keepBlock[i]) {
+                    keptTokens += blockTokenSize(i);
+                }
+            }
+
+            int targetKeep = (int)std::ceil(mMeta->h2o_target_keep_ratio * kvSeqLen);
+            targetKeep = ALIMAX(1, ALIMIN(kvSeqLen, targetKeep));
+            if (keptTokens < targetKeep) {
+                std::vector<std::pair<float, int>> candidates;
+                candidates.reserve(h2oBlockCount);
+                for (int i = 0; i < h2oBlockCount; ++i) {
+                    if (!keepBlock[i]) {
+                        candidates.emplace_back(mH2OState->blockScores[i], i);
+                    }
+                }
+                std::sort(candidates.begin(), candidates.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                    return a.first > b.first;
+                });
+                for (auto& item : candidates) {
+                    if (keptTokens >= targetKeep) {
+                        break;
+                    }
+                    keepBlock[item.second] = 1;
+                    keptTokens += blockTokenSize(item.second);
+                }
+            }
+
+            std::vector<int> reservePairs;
+            reservePairs.reserve(h2oBlockCount * 2);
+            int runBegin = -1;
+            int runEnd = -1;
+            for (int i = 0; i < h2oBlockCount; ++i) {
+                if (!keepBlock[i]) {
+                    continue;
+                }
+                const int blockBegin = i * h2oBlockTokens;
+                const int blockEnd = ALIMIN(kvSeqLen, blockBegin + h2oBlockTokens);
+                if (runBegin < 0) {
+                    runBegin = blockBegin;
+                    runEnd = blockEnd;
+                } else if (blockBegin == runEnd) {
+                    runEnd = blockEnd;
+                } else {
+                    reservePairs.emplace_back(runBegin);
+                    reservePairs.emplace_back(runEnd - runBegin);
+                    runBegin = blockBegin;
+                    runEnd = blockEnd;
+                }
+            }
+            if (runBegin >= 0) {
+                reservePairs.emplace_back(runBegin);
+                reservePairs.emplace_back(runEnd - runBegin);
+            }
+
+            int finalKeepTokens = 0;
+            for (size_t i = 0; i + 1 < reservePairs.size(); i += 2) {
+                finalKeepTokens += reservePairs[i + 1];
+            }
+            const int evictedTokens = ALIMAX(0, kvSeqLen - finalKeepTokens);
+
+            if (evictedTokens > 0 && !reservePairs.empty()) {
+                mH2OState->reserveStorage.swap(reservePairs);
+                mMeta->h2o_pending_remove = kvSeqLen;
+                mMeta->h2o_pending_reserve = mH2OState->reserveStorage.data();
+                mMeta->h2o_pending_n_reserve = (int)mH2OState->reserveStorage.size() / 2;
+                mMeta->h2o_pending_plan_ready = 1;
+
+                const size_t bytesPerToken = (size_t)mKvNumHead * (size_t)mHeadDim * (size_t)mBytes * 2;
+                const size_t rawBefore = (size_t)kvSeqLen * bytesPerToken;
+                const size_t rawAfter = (size_t)finalKeepTokens * bytesPerToken;
+                const size_t metaBytes = (size_t)mH2OState->reserveStorage.size() * sizeof(int);
+                const size_t lossyDen = rawAfter + metaBytes;
+                mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
+                mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
+                // v1 keeps runtime codec as a metric placeholder; detailed codec eval is done offline.
+                mMeta->h2o_lossless_ratio = 1.0f;
+                mMeta->h2o_last_evict_tokens = evictedTokens;
+                mMeta->h2o_total_evict_tokens += evictedTokens;
+            }
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            mMeta->h2o_evict_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            mMeta->h2o_codec_us = 0;
+            if (mMeta->h2o_log_stats != 0 && mMeta->h2o_last_evict_tokens > 0) {
+                MNN_PRINT("[H2O] kv=%d keep_ratio=%.4f evict=%d lossy_ratio=%.4f evict_us=%lld reserve_pairs=%d\n",
+                          kvSeqLen,
+                          mMeta->h2o_keep_ratio,
+                          mMeta->h2o_last_evict_tokens,
+                          mMeta->h2o_lossy_ratio,
+                          (long long)mMeta->h2o_evict_us,
+                          mMeta->h2o_pending_n_reserve);
+            }
+        }
+    }
 
     backend()->onReleaseBuffer(unpackQK.get(), Backend::STATIC);
     backend()->onReleaseBuffer(softmMaxQ.get(), Backend::STATIC);
@@ -804,6 +1001,7 @@ bool CPUAttention::onClone(Backend* bn, const Op* op, Execution** dst) {
     }
     auto tmp = new CPUAttention(bn, mKVCache);
     tmp->mKVCacheManager = mKVCacheManager;
+    tmp->mH2OState = mH2OState;
     *dst = tmp;
     return true;
 }
@@ -827,6 +1025,7 @@ CPUAttention::CPUAttention(Backend *backend, bool kv_cache) : Execution(backend)
     kvconfig.mExpandChunk = 64;
     kvconfig.mBlockNum = 1;
     mKVCacheManager.reset(new CPUKVCacheManager(backend, kvconfig));
+    mH2OState.reset(new H2OSharedState);
 }
 
 CPUAttention::~CPUAttention() {
@@ -847,4 +1046,3 @@ REGISTER_CPU_OP_CREATOR_TRANSFORMER(CPUAttentionCreator, OpType_Attention);
 } // namespace MNN
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE
-

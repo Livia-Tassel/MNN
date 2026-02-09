@@ -11,6 +11,8 @@
 #ifndef CPUATTENTION_HPP
 #define CPUATTENTION_HPP
 
+#include <memory>
+#include <vector>
 #include <functional>
 #include "core/Execution.hpp"
 #include "core/OpCommonUtils.hpp"
@@ -27,6 +29,13 @@ public:
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
 private:
+    struct H2OSharedState {
+        std::vector<float> blockScores;
+        std::vector<int> reserveStorage;
+        int64_t step = 0;
+        int64_t lastTriggerStep = 0;
+    };
+
     bool mKVCache        = true;
     int mBytes = 4;
     int mThreadNum = 1;
@@ -51,6 +60,7 @@ private:
 
     MemChunk mQuantQK, mQKScale, mQKBias, mSumQK, mArray;
     AutoStorage<int8_t> mGemmBias, mGemmRelu;
+    std::shared_ptr<H2OSharedState> mH2OState;
 
     std::function<void(const float*, int8_t*, size_t, const float*, ssize_t, ssize_t, const float*, ssize_t)> mQuantFunc;
     decltype(CoreInt8Functions::Int8GemmKernel) mInt8GemmKernel;
