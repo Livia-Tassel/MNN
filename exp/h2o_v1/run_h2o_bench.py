@@ -33,6 +33,17 @@ def normalize_base_dir(base_cfg, base_config_path):
     return base_dir
 
 
+def normalize_path_field(cfg, key, base_dir, default_value):
+    raw = cfg.get(key, default_value)
+    if not isinstance(raw, str) or not raw:
+        return
+    p = Path(raw)
+    if p.is_absolute():
+        cfg[key] = os.fspath(p.resolve())
+        return
+    cfg[key] = os.fspath((Path(base_dir) / raw).resolve())
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_bench sweeps for H2O v1.")
     parser.add_argument("--llm-bench", required=True, help="Path to llm_bench binary.")
@@ -113,6 +124,14 @@ def main():
                 "kv_lossless_codec": args.kv_lossless_codec,
             }
         )
+        # Pin common model resource paths to absolute paths to avoid relocation issues
+        # when writing temporary configs into out_dir/configs.
+        normalize_path_field(cfg, "llm_config", normalized_base_dir, "llm_config.json")
+        normalize_path_field(cfg, "llm_model", normalized_base_dir, "llm.mnn")
+        normalize_path_field(cfg, "llm_weight", normalized_base_dir, "llm.mnn.weight")
+        normalize_path_field(cfg, "embedding_file", normalized_base_dir, "embeddings_bf16.bin")
+        normalize_path_field(cfg, "tokenizer_file", normalized_base_dir, "tokenizer.txt")
+        normalize_path_field(cfg, "context_file", normalized_base_dir, "context.json")
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=True, indent=2), encoding="utf-8")
 
         cmd = [
