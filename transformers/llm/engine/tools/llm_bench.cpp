@@ -822,17 +822,44 @@ static std::vector<commandParametersInstance> get_cmd_params_instances(const Run
     return instances;
 }
 
+static bool isAbsolutePath(const std::string& path) {
+#if defined(WIN32) || defined(_WIN32) || defined(_WIN64) || defined(_MSC_VER)
+    if (path.size() >= 3 && path[1] == ':' && (path[2] == '/' || path[2] == '\\')) {
+        return true;
+    }
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
+        return true;
+    }
+#endif
+    return !path.empty() && (path[0] == '/' || path[0] == '\\');
+}
+
+static std::string trimTrailingSlash(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+    size_t end = path.size();
+    while (end > 0 && (path[end - 1] == '/' || path[end - 1] == '\\')) {
+        --end;
+    }
+    return path.substr(0, end);
+}
+
 std::string getDirectoryOf(const std::string& file_path, std::string& modelname) {
-    // weight filename
     std::string weight_name = "llm.mnn.weight";
+    std::string base_dir;
     std::ifstream file(file_path.c_str());
     std::string json_str((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
     rapidjson::Document doc;
     doc.Parse(json_str.c_str());
-
-    if (doc.HasMember("llm_weight") && doc["llm_weight"].IsString()) {
-        weight_name = doc["llm_weight"].GetString();
+    if (!doc.HasParseError()) {
+        if (doc.HasMember("llm_weight") && doc["llm_weight"].IsString()) {
+            weight_name = doc["llm_weight"].GetString();
+        }
+        if (doc.HasMember("base_dir") && doc["base_dir"].IsString()) {
+            base_dir = doc["base_dir"].GetString();
+        }
     }
 
     size_t pos = file_path.find_last_of("/\\");
@@ -840,10 +867,23 @@ std::string getDirectoryOf(const std::string& file_path, std::string& modelname)
         MNN_ERROR("Invalid model config path\n");
         return "";
     }
-    auto dir = file_path.substr(0, pos);
-    pos = dir.find_last_of("/\\");
-    modelname = dir.substr(pos + 1, -1);
-    return MNNFilePathConcat(dir, weight_name);
+    const auto config_dir = file_path.substr(0, pos);
+    const auto path_for_name = trimTrailingSlash(base_dir.empty() ? config_dir : base_dir);
+    if (path_for_name.empty()) {
+        modelname = "";
+    } else {
+        pos = path_for_name.find_last_of("/\\");
+        modelname = (pos == std::string::npos) ? path_for_name : path_for_name.substr(pos + 1);
+    }
+
+    if (isAbsolutePath(weight_name)) {
+        return weight_name;
+    }
+    const auto root = trimTrailingSlash(base_dir.empty() ? config_dir : base_dir);
+    if (root.empty()) {
+        return weight_name;
+    }
+    return MNNFilePathConcat(root, weight_name);
 }
 
 static void printUsage(int /* argc */, char ** argv) {
