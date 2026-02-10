@@ -27,7 +27,7 @@ Put these keys in your model config (or let scripts generate merged configs):
 
 ## Quick start
 `run_h2o_bench.py` will auto-set `base_dir` to the directory of `--base-config`,
-so model-relative files (`llm.mnn`, `llm.mnn.weight`, `tokenizer.txt`, etc.) still resolve correctly.
+and rewrite model file fields to be relative to `base_dir` (MNN resolves paths as `base_dir + field_value`).
 
 1. Run a sweep:
 
