@@ -133,7 +133,7 @@ public:
     float value(const char* key, const float& default_value) const {
         if (document.HasMember(key)) {
             const auto& value = document[key];
-            if (value.IsFloat()) return value.GetFloat();
+            if (value.IsNumber()) return (float)value.GetDouble();
         }
         return default_value;
     }

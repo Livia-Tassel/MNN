@@ -969,13 +969,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             mMeta->h2o_evict_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             mMeta->h2o_codec_us = 0;
             if (mMeta->h2o_log_stats != 0 && mMeta->h2o_last_evict_tokens > 0) {
-                MNN_PRINT("[H2O] kv=%d keep_ratio=%.4f evict=%d lossy_ratio=%.4f evict_us=%lld reserve_pairs=%d\n",
+                MNN_PRINT("[H2O] kv=%d keep_ratio=%.4f evict=%d lossy_ratio=%.4f evict_us=%lld reserve_pairs=%d target=%.3f recent=%d sink=%d block=%d\n",
                           kvSeqLen,
                           mMeta->h2o_keep_ratio,
                           mMeta->h2o_last_evict_tokens,
                           mMeta->h2o_lossy_ratio,
                           (long long)mMeta->h2o_evict_us,
-                          mMeta->h2o_pending_n_reserve);
+                          mMeta->h2o_pending_n_reserve,
+                          mMeta->h2o_target_keep_ratio,
+                          mMeta->h2o_recent_tokens,
+                          mMeta->h2o_sink_tokens,
+                          h2oBlockTokens);
             }
         }
     }
