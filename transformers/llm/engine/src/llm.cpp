@@ -747,6 +747,16 @@ void Llm::reset() {
     mMeta->h2o_pending_remove = 0;
     mMeta->h2o_pending_reserve = nullptr;
     mMeta->h2o_pending_n_reserve = 0;
+    mMeta->h2o_keep_ratio = 1.0f;
+    mMeta->h2o_lossy_ratio = 1.0f;
+    mMeta->h2o_lossless_ratio = 1.0f;
+    mMeta->h2o_target_keep_effective = 1.0f;
+    mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
+    mMeta->h2o_block_quantized_keep = 1.0f;
+    mMeta->h2o_evict_us = 0;
+    mMeta->h2o_codec_us = 0;
+    mMeta->h2o_last_evict_tokens = 0;
+    mMeta->h2o_total_evict_tokens = 0;
 }
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
@@ -773,6 +783,16 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mMeta->h2o_pending_reserve = nullptr;
         mMeta->h2o_pending_n_reserve = 0;
         mMeta->h2o_in_decode = 0;
+        mMeta->h2o_keep_ratio = 1.0f;
+        mMeta->h2o_lossy_ratio = 1.0f;
+        mMeta->h2o_lossless_ratio = 1.0f;
+        mMeta->h2o_target_keep_effective = 1.0f;
+        mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
+        mMeta->h2o_block_quantized_keep = 1.0f;
+        mMeta->h2o_evict_us = 0;
+        mMeta->h2o_codec_us = 0;
+        mMeta->h2o_last_evict_tokens = 0;
+        mMeta->h2o_total_evict_tokens = 0;
     }
     mContext->output_tokens.clear();
 }

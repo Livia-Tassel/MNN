@@ -461,11 +461,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         && !mQuantValue
         && seqLen > 0
         && kvSeqLen > 0;
-    if (mMeta != nullptr && mMeta->h2o_in_decode != 0) {
-        mMeta->h2o_target_keep_effective = 1.0f;
-        mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
-        mMeta->h2o_block_quantized_keep = 1.0f;
-    }
     const int h2oBlockTokens = h2oEnabled ? ALIMAX(1, mMeta->h2o_block_tokens) : 1;
     const int h2oBlockCount = h2oEnabled ? UP_DIV(kvSeqLen, h2oBlockTokens) : 0;
     std::vector<float> h2oBlockAcc;
@@ -945,8 +940,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         const bool shouldTrigger = kvSeqLen >= triggerMin
             && (mH2OState->globalStep - mH2OState->globalLastTriggerStep >= updateInterval);
 
-        mMeta->h2o_last_evict_tokens = 0;
-        mMeta->h2o_evict_us = 0;
         if (shouldTrigger) {
             mH2OState->globalLastTriggerStep = mH2OState->globalStep;
             auto t0 = std::chrono::high_resolution_clock::now();
