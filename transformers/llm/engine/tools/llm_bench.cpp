@@ -178,6 +178,9 @@ struct TestInstance {
     std::vector<double>      h2oKeep;
     std::vector<double>      h2oLossy;
     std::vector<double>      h2oLossless;
+    std::vector<double>      h2oTargetKeepEffective;
+    std::vector<double>      h2oFloorKeep;
+    std::vector<double>      h2oQuantizedKeep;
     std::vector<double>      h2oEvictUs;
     std::vector<double>      h2oCodecUs;
     int                      backend;
@@ -227,6 +230,9 @@ struct TestInstance {
             || field == "h2o_keep"
             || field == "h2o_lossy"
             || field == "h2o_lossless"
+            || field == "h2o_target_keep_effective"
+            || field == "h2o_floor_keep"
+            || field == "h2o_quantized_keep"
             || field == "h2o_evict_us"
             || field == "h2o_codec_us") {
             return FLOAT;
@@ -350,6 +356,9 @@ struct markdownPrinter : public Printer {
             fields.emplace_back("h2o_keep");
             fields.emplace_back("h2o_lossy");
             fields.emplace_back("h2o_lossless");
+            fields.emplace_back("h2o_target_keep_effective");
+            fields.emplace_back("h2o_floor_keep");
+            fields.emplace_back("h2o_quantized_keep");
             fields.emplace_back("h2o_evict_us");
             fields.emplace_back("h2o_codec_us");
         }
@@ -417,6 +426,15 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "h2o_lossless") {
                 snprintf(buf, sizeof(buf), "%.3f ± %.3f", t.getAvgUs(t.h2oLossless), t.getStdevUs(t.h2oLossless));
+                value = buf;
+            } else if (field == "h2o_target_keep_effective") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oTargetKeepEffective), t.getStdevUs(t.h2oTargetKeepEffective));
+                value = buf;
+            } else if (field == "h2o_floor_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oFloorKeep), t.getStdevUs(t.h2oFloorKeep));
+                value = buf;
+            } else if (field == "h2o_quantized_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oQuantizedKeep), t.getStdevUs(t.h2oQuantizedKeep));
                 value = buf;
             } else if (field == "h2o_evict_us") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oEvictUs), t.getStdevUs(t.h2oEvictUs));
@@ -620,6 +638,24 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.h2oLossless));
                 writer.Key("h2o_lossless_ratio_std");
                 writer.Double(inst.getStdevUs(inst.h2oLossless));
+            }
+            if (!inst.h2oTargetKeepEffective.empty()) {
+                writer.Key("h2o_target_keep_effective");
+                writer.Double(inst.getAvgUs(inst.h2oTargetKeepEffective));
+                writer.Key("h2o_target_keep_effective_std");
+                writer.Double(inst.getStdevUs(inst.h2oTargetKeepEffective));
+            }
+            if (!inst.h2oFloorKeep.empty()) {
+                writer.Key("h2o_floor_keep");
+                writer.Double(inst.getAvgUs(inst.h2oFloorKeep));
+                writer.Key("h2o_floor_keep_std");
+                writer.Double(inst.getStdevUs(inst.h2oFloorKeep));
+            }
+            if (!inst.h2oQuantizedKeep.empty()) {
+                writer.Key("h2o_quantized_keep");
+                writer.Double(inst.getAvgUs(inst.h2oQuantizedKeep));
+                writer.Key("h2o_quantized_keep_std");
+                writer.Double(inst.getStdevUs(inst.h2oQuantizedKeep));
             }
             if (!inst.h2oEvictUs.empty()) {
                 writer.Key("h2o_evict_us");
@@ -1305,6 +1341,9 @@ int main(int argc, char ** argv) {
                     t.h2oKeep.push_back(context->h2o_keep_ratio);
                     t.h2oLossy.push_back(context->h2o_lossy_ratio);
                     t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oTargetKeepEffective.push_back(context->h2o_target_keep_effective);
+                    t.h2oFloorKeep.push_back(context->h2o_floor_keep_by_recent_sink);
+                    t.h2oQuantizedKeep.push_back(context->h2o_block_quantized_keep);
                     t.h2oEvictUs.push_back((double)context->h2o_evict_us);
                     t.h2oCodecUs.push_back((double)context->h2o_codec_us);
                 }
@@ -1339,6 +1378,9 @@ int main(int argc, char ** argv) {
                     t.h2oKeep.push_back(context->h2o_keep_ratio);
                     t.h2oLossy.push_back(context->h2o_lossy_ratio);
                     t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oTargetKeepEffective.push_back(context->h2o_target_keep_effective);
+                    t.h2oFloorKeep.push_back(context->h2o_floor_keep_by_recent_sink);
+                    t.h2oQuantizedKeep.push_back(context->h2o_block_quantized_keep);
                     t.h2oEvictUs.push_back((double)context->h2o_evict_us);
                     t.h2oCodecUs.push_back((double)context->h2o_codec_us);
                 }

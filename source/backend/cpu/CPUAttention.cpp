@@ -9,6 +9,7 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -143,6 +144,56 @@ static void _maskQK(float * qkPacked, const float* scale, size_t seqLen, size_t 
             }
         }
     }
+}
+
+static inline int clampInt(int value, int low, int high) {
+    return ALIMAX(low, ALIMIN(high, value));
+}
+
+static double byteEntropyBits(const std::array<uint32_t, 256>& hist, size_t total) {
+    if (total == 0) {
+        return 0.0;
+    }
+    const double invTotal = 1.0 / static_cast<double>(total);
+    double bits = 0.0;
+    for (int i = 0; i < 256; ++i) {
+        const auto c = hist[i];
+        if (c == 0) {
+            continue;
+        }
+        const double p = static_cast<double>(c) * invTotal;
+        bits += -static_cast<double>(c) * std::log2(p);
+    }
+    return bits;
+}
+
+// Estimate compressed bytes for FP16 stream with "gear_delta" style modeling:
+// low-byte stream + delta(high-byte stream), both entropy-coded.
+static double estimateGearDeltaCompressedBytes(const uint8_t* data, size_t bytes) {
+    if (data == nullptr || bytes < 2) {
+        return static_cast<double>(bytes);
+    }
+    const size_t words = bytes / 2;
+    if (words == 0) {
+        return static_cast<double>(bytes);
+    }
+    std::array<uint32_t, 256> loHist{};
+    std::array<uint32_t, 256> hiDeltaHist{};
+    uint8_t prevHi = 0;
+    for (size_t i = 0; i < words; ++i) {
+        const uint8_t lo = data[2 * i + 0];
+        const uint8_t hi = data[2 * i + 1];
+        loHist[lo] += 1;
+        const uint8_t deltaHi = static_cast<uint8_t>(hi - prevHi);
+        hiDeltaHist[deltaHi] += 1;
+        prevHi = hi;
+    }
+    const double loBits = byteEntropyBits(loHist, words);
+    const double hiBits = byteEntropyBits(hiDeltaHist, words);
+    // Add a small per-stream overhead to avoid over-optimistic tiny samples.
+    const double overheadBytes = 64.0;
+    const double compressed = (loBits + hiBits) / 8.0 + overheadBytes;
+    return ALIMAX(1.0, compressed);
 }
 
 ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
@@ -382,14 +433,43 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     const float* sinksPtr = sinks ? sinks->host<float>() : nullptr;
     int kvValidOffset = kvSeqLen - seqLen; // reuse_kv=true or decode, kvValidOffset>0
 
+    const int layerCount = (mMeta != nullptr) ? ALIMAX(1, mMeta->layer_nums) : 1;
+    int layerIndex = 0;
+    if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
+        layerIndex = static_cast<int>(mH2OState->decodeLayerCursor % static_cast<int64_t>(layerCount));
+        mH2OState->decodeLayerCursor += 1;
+        if (layerIndex == 0) {
+            mH2OState->losslessRatioSum = 0.0;
+            mH2OState->losslessRatioCount = 0;
+            mH2OState->losslessCodecUsSum = 0;
+        }
+    }
+    int h2oLayerStart = 0;
+    int h2oLayerEnd = layerCount - 1;
+    if (mMeta != nullptr) {
+        h2oLayerStart = clampInt(mMeta->h2o_layer_start, 0, layerCount - 1);
+        if (mMeta->h2o_layer_end >= 0) {
+            h2oLayerEnd = clampInt(mMeta->h2o_layer_end, 0, layerCount - 1);
+        }
+    }
+    const bool h2oLayerInRange = (h2oLayerEnd >= h2oLayerStart)
+        && (layerIndex >= h2oLayerStart)
+        && (layerIndex <= h2oLayerEnd);
+
     const bool h2oEnabled = mKVCache
         && mMeta != nullptr
         && mMeta->h2o_enable != 0
         && mMeta->h2o_in_decode != 0
+        && h2oLayerInRange
         && !mQuantKey
         && !mQuantValue
         && seqLen > 0
         && kvSeqLen > 0;
+    if (mMeta != nullptr && mMeta->h2o_in_decode != 0) {
+        mMeta->h2o_target_keep_effective = 1.0f;
+        mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
+        mMeta->h2o_block_quantized_keep = 1.0f;
+    }
     const int h2oBlockTokens = h2oEnabled ? ALIMAX(1, mMeta->h2o_block_tokens) : 1;
     const int h2oBlockCount = h2oEnabled ? UP_DIV(kvSeqLen, h2oBlockTokens) : 0;
     std::vector<float> h2oBlockAcc;
@@ -839,29 +919,39 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
     MNN_CONCURRENCY_END();
 
-    if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && mH2OState != nullptr) {
-        if ((int)mH2OState->blockScores.size() != h2oBlockCount) {
-            mH2OState->blockScores.resize(h2oBlockCount, 0.0f);
+    int finalKeepTokensForLayer = kvSeqLen;
+    CPUAttention::H2OSharedState::LayerState* layerStatePtr = nullptr;
+    if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
+        if ((int)mH2OState->layerStates.size() != layerCount) {
+            mH2OState->layerStates.clear();
+            mH2OState->layerStates.resize(layerCount);
+        }
+        layerStatePtr = &mH2OState->layerStates[layerIndex];
+        layerStatePtr->step += 1;
+    }
+
+    if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && layerStatePtr != nullptr) {
+        auto& layerState = *layerStatePtr;
+        if ((int)layerState.blockScores.size() != h2oBlockCount) {
+            layerState.blockScores.resize(h2oBlockCount, 0.0f);
         }
 
         const float alpha = ALIMIN(1.0f, ALIMAX(0.0f, mMeta->h2o_ema_alpha));
         const float norm = (float)ALIMAX(1, mNumHead * seqLen);
         for (int i = 0; i < h2oBlockCount; ++i) {
             const float current = h2oBlockAcc[i] / norm;
-            mH2OState->blockScores[i] = alpha * mH2OState->blockScores[i] + (1.0f - alpha) * current;
+            layerState.blockScores[i] = alpha * layerState.blockScores[i] + (1.0f - alpha) * current;
         }
-        mH2OState->step += 1;
 
         const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
         const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
         const bool shouldTrigger = kvSeqLen >= triggerMin
-            && (mH2OState->step - mH2OState->lastTriggerStep >= updateInterval);
+            && (layerState.step - layerState.lastTriggerStep >= updateInterval);
 
         mMeta->h2o_last_evict_tokens = 0;
         mMeta->h2o_evict_us = 0;
-        mMeta->h2o_codec_us = 0;
         if (shouldTrigger) {
-            mH2OState->lastTriggerStep = mH2OState->step;
+            layerState.lastTriggerStep = layerState.step;
             auto t0 = std::chrono::high_resolution_clock::now();
 
             std::vector<char> keepBlock(h2oBlockCount, 0);
@@ -889,22 +979,39 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     keptTokens += blockTokenSize(i);
                 }
             }
+            mMeta->h2o_floor_keep_by_recent_sink = kvSeqLen > 0 ? (float)keptTokens / (float)kvSeqLen : 1.0f;
 
-            int targetKeep = (int)std::ceil(mMeta->h2o_target_keep_ratio * kvSeqLen);
+            float targetKeepRatio = ALIMIN(1.0f, ALIMAX(0.0f, mMeta->h2o_target_keep_ratio));
+            if (mMeta->h2o_target_mode != 0) {
+                const float targetLossy = ALIMAX(1.0f, mMeta->h2o_target_lossy_ratio);
+                targetKeepRatio = 1.0f / targetLossy;
+            }
+            int targetKeep = (int)std::ceil(targetKeepRatio * kvSeqLen);
             targetKeep = ALIMAX(1, ALIMIN(kvSeqLen, targetKeep));
-            if (keptTokens < targetKeep) {
+            targetKeep = ALIMAX(targetKeep, keptTokens);
+            mMeta->h2o_target_keep_effective = kvSeqLen > 0 ? (float)targetKeep / (float)kvSeqLen : 1.0f;
+
+            int quantizedTargetKeep = keptTokens;
+            if (quantizedTargetKeep < targetKeep) {
+                const int needTokens = targetKeep - quantizedTargetKeep;
+                const int needBlocks = UP_DIV(needTokens, h2oBlockTokens);
+                quantizedTargetKeep = ALIMIN(kvSeqLen, quantizedTargetKeep + needBlocks * h2oBlockTokens);
+            }
+            mMeta->h2o_block_quantized_keep = kvSeqLen > 0 ? (float)quantizedTargetKeep / (float)kvSeqLen : 1.0f;
+
+            if (keptTokens < quantizedTargetKeep) {
                 std::vector<std::pair<float, int>> candidates;
                 candidates.reserve(h2oBlockCount);
                 for (int i = 0; i < h2oBlockCount; ++i) {
                     if (!keepBlock[i]) {
-                        candidates.emplace_back(mH2OState->blockScores[i], i);
+                        candidates.emplace_back(layerState.blockScores[i], i);
                     }
                 }
                 std::sort(candidates.begin(), candidates.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
                     return a.first > b.first;
                 });
                 for (auto& item : candidates) {
-                    if (keptTokens >= targetKeep) {
+                    if (keptTokens >= quantizedTargetKeep) {
                         break;
                     }
                     keepBlock[item.second] = 1;
@@ -943,7 +1050,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             for (size_t i = 0; i + 1 < reservePairs.size(); i += 2) {
                 finalKeepTokens += reservePairs[i + 1];
             }
+            finalKeepTokensForLayer = finalKeepTokens;
             const int evictedTokens = ALIMAX(0, kvSeqLen - finalKeepTokens);
+            const size_t reserveMetaBytes = (size_t)reservePairs.size() * sizeof(int);
 
             if (evictedTokens > 0 && !reservePairs.empty()) {
                 mH2OState->reserveStorage.swap(reservePairs);
@@ -951,25 +1060,22 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mMeta->h2o_pending_reserve = mH2OState->reserveStorage.data();
                 mMeta->h2o_pending_n_reserve = (int)mH2OState->reserveStorage.size() / 2;
                 mMeta->h2o_pending_plan_ready = 1;
-
-                const size_t bytesPerToken = (size_t)mKvNumHead * (size_t)mHeadDim * (size_t)mBytes * 2;
-                const size_t rawBefore = (size_t)kvSeqLen * bytesPerToken;
-                const size_t rawAfter = (size_t)finalKeepTokens * bytesPerToken;
-                const size_t metaBytes = (size_t)mH2OState->reserveStorage.size() * sizeof(int);
-                const size_t lossyDen = rawAfter + metaBytes;
-                mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
-                mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
-                // v1 keeps runtime codec as a metric placeholder; detailed codec eval is done offline.
-                mMeta->h2o_lossless_ratio = 1.0f;
-                mMeta->h2o_last_evict_tokens = evictedTokens;
                 mMeta->h2o_total_evict_tokens += evictedTokens;
             }
 
+            const size_t bytesPerToken = (size_t)mKvNumHead * (size_t)mHeadDim * (size_t)mBytes * 2;
+            const size_t rawBefore = (size_t)kvSeqLen * bytesPerToken;
+            const size_t rawAfter = (size_t)finalKeepTokens * bytesPerToken;
+            const size_t lossyDen = rawAfter + reserveMetaBytes;
+            mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
+            mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
+            mMeta->h2o_last_evict_tokens = evictedTokens;
+
             auto t1 = std::chrono::high_resolution_clock::now();
             mMeta->h2o_evict_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-            mMeta->h2o_codec_us = 0;
             if (mMeta->h2o_log_stats != 0 && mMeta->h2o_last_evict_tokens > 0) {
-                MNN_PRINT("[H2O] kv=%d keep_ratio=%.4f evict=%d lossy_ratio=%.4f evict_us=%lld reserve_pairs=%d target=%.3f recent=%d sink=%d block=%d\n",
+                MNN_PRINT("[H2O] layer=%d kv=%d keep_ratio=%.4f evict=%d lossy_ratio=%.4f evict_us=%lld reserve_pairs=%d target=%.3f effective=%.3f floor=%.3f quantized=%.3f recent=%d sink=%d block=%d\n",
+                          layerIndex,
                           kvSeqLen,
                           mMeta->h2o_keep_ratio,
                           mMeta->h2o_last_evict_tokens,
@@ -977,9 +1083,88 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                           (long long)mMeta->h2o_evict_us,
                           mMeta->h2o_pending_n_reserve,
                           mMeta->h2o_target_keep_ratio,
+                          mMeta->h2o_target_keep_effective,
+                          mMeta->h2o_floor_keep_by_recent_sink,
+                          mMeta->h2o_block_quantized_keep,
                           mMeta->h2o_recent_tokens,
                           mMeta->h2o_sink_tokens,
                           h2oBlockTokens);
+            }
+        } else if (kvSeqLen > 0) {
+            finalKeepTokensForLayer = ALIMAX(1, (int)std::round(mMeta->h2o_keep_ratio * kvSeqLen));
+        }
+    }
+
+    if (layerStatePtr != nullptr && mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
+        auto estimateLosslessRatio = [&](int tokenBudget) -> float {
+            if (mMeta->h2o_lossless_codec != 1 || mBytes != 2 || tokenBudget <= 0 || kvSeqLen <= 0) {
+                return 1.0f;
+            }
+            const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
+            const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
+            const size_t keyBytesPerHead = (size_t)UP_DIV(evalTokens, hP) * (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP * (size_t)mBytes;
+            const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
+            const size_t sampleCap = 128 * 1024;
+
+            double rawBytes = 0.0;
+            double compressedBytes = 0.0;
+            for (int h = 0; h < mKvNumHead; ++h) {
+                const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
+                const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
+                size_t keySampleBytes = ALIMIN(keyBytesPerHead, sampleCap);
+                size_t valueSampleBytes = ALIMIN(valueBytesPerHead, sampleCap);
+                keySampleBytes = (keySampleBytes / 2) * 2;
+                valueSampleBytes = (valueSampleBytes / 2) * 2;
+                if (keySampleBytes >= 2) {
+                    rawBytes += keySampleBytes;
+                    compressedBytes += estimateGearDeltaCompressedBytes(keyPtr, keySampleBytes);
+                }
+                if (valueSampleBytes >= 2) {
+                    rawBytes += valueSampleBytes;
+                    compressedBytes += estimateGearDeltaCompressedBytes(valuePtr, valueSampleBytes);
+                }
+            }
+            if (rawBytes <= 0.0 || compressedBytes <= 0.0) {
+                return 1.0f;
+            }
+            return (float)ALIMAX(1.0, rawBytes / compressedBytes);
+        };
+
+        bool applyLossless = false;
+        int losslessTokenBudget = kvSeqLen;
+        if (mMeta->h2o_lossless_enable != 0 && mMeta->h2o_lossless_codec == 1) {
+            if (mMeta->h2o_lossless_scope == 1) { // front_n
+                applyLossless = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
+                losslessTokenBudget = kvSeqLen;
+            } else if (mMeta->h2o_lossless_scope == 2) { // h2o_kept
+                applyLossless = h2oLayerInRange;
+                losslessTokenBudget = finalKeepTokensForLayer;
+            }
+        }
+        if (applyLossless) {
+            const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
+            const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
+            const bool shouldUpdateLossless = kvSeqLen >= triggerMin
+                && (layerStatePtr->step - layerStatePtr->lastLosslessStep >= updateInterval);
+            if (shouldUpdateLossless || layerStatePtr->lastLosslessRatio <= 1.0f) {
+                auto c0 = std::chrono::high_resolution_clock::now();
+                layerStatePtr->lastLosslessRatio = estimateLosslessRatio(losslessTokenBudget);
+                auto c1 = std::chrono::high_resolution_clock::now();
+                layerStatePtr->lastLosslessCodecUs =
+                    (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(c1 - c0).count();
+                layerStatePtr->lastLosslessStep = layerStatePtr->step;
+            }
+            mH2OState->losslessRatioSum += layerStatePtr->lastLosslessRatio;
+            mH2OState->losslessRatioCount += 1;
+            mH2OState->losslessCodecUsSum += layerStatePtr->lastLosslessCodecUs;
+        }
+        if (layerIndex == layerCount - 1) {
+            if (mH2OState->losslessRatioCount > 0) {
+                mMeta->h2o_lossless_ratio = (float)(mH2OState->losslessRatioSum / (double)mH2OState->losslessRatioCount);
+                mMeta->h2o_codec_us = mH2OState->losslessCodecUsSum / mH2OState->losslessRatioCount;
+            } else {
+                mMeta->h2o_lossless_ratio = 1.0f;
+                mMeta->h2o_codec_us = 0;
             }
         }
     }

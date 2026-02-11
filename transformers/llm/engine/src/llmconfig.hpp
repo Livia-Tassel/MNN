@@ -453,6 +453,12 @@ public:
     bool kv_h2o_enable() const {
         return config_.value("kv_h2o_enable", false);
     }
+    int kv_h2o_layer_start() const {
+        return config_.value("kv_h2o_layer_start", 2);
+    }
+    int kv_h2o_layer_end() const {
+        return config_.value("kv_h2o_layer_end", -1);
+    }
     int kv_h2o_block_tokens() const {
         return config_.value("kv_h2o_block_tokens", 64);
     }
@@ -464,6 +470,12 @@ public:
     }
     float kv_h2o_target_keep_ratio() const {
         return config_.value("kv_h2o_target_keep_ratio", 0.50f);
+    }
+    std::string kv_h2o_target_mode() const {
+        return config_.value("kv_h2o_target_mode", "adaptive");
+    }
+    float kv_h2o_target_lossy_ratio() const {
+        return config_.value("kv_h2o_target_lossy_ratio", 3.0f);
     }
     float kv_h2o_ema_alpha() const {
         return config_.value("kv_h2o_ema_alpha", 0.90f);
@@ -479,6 +491,12 @@ public:
     }
     bool kv_lossless_enable() const {
         return config_.value("kv_lossless_enable", false);
+    }
+    std::string kv_lossless_scope() const {
+        return config_.value("kv_lossless_scope", "front_n");
+    }
+    int kv_lossless_front_n() const {
+        return config_.value("kv_lossless_front_n", 2);
     }
     std::string kv_lossless_codec() const {
         return config_.value("kv_lossless_codec", "none");

@@ -96,6 +96,9 @@ struct LlmContext {
     float h2o_keep_ratio = 1.0f;
     float h2o_lossy_ratio = 1.0f;
     float h2o_lossless_ratio = 1.0f;
+    float h2o_target_keep_effective = 1.0f;
+    float h2o_floor_keep_by_recent_sink = 1.0f;
+    float h2o_block_quantized_keep = 1.0f;
     int64_t h2o_evict_us = 0;
     int64_t h2o_codec_us = 0;
     int h2o_last_evict_tokens = 0;

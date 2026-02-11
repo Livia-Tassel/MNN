@@ -69,15 +69,29 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
         return;
     }
     meta->h2o_enable = cfg->kv_h2o_enable() ? 1 : 0;
+    meta->h2o_layer_start = ALIMAX(0, cfg->kv_h2o_layer_start());
+    meta->h2o_layer_end = cfg->kv_h2o_layer_end();
     meta->h2o_block_tokens = ALIMAX(1, cfg->kv_h2o_block_tokens());
     meta->h2o_sink_tokens = ALIMAX(0, cfg->kv_h2o_sink_tokens());
     meta->h2o_recent_tokens = ALIMAX(0, cfg->kv_h2o_recent_tokens());
     meta->h2o_target_keep_ratio = ALIMIN(1.0f, ALIMAX(0.0f, cfg->kv_h2o_target_keep_ratio()));
+    const auto targetMode = cfg->kv_h2o_target_mode();
+    meta->h2o_target_mode = (targetMode == "static") ? 0 : 1;
+    meta->h2o_target_lossy_ratio = ALIMAX(1.0f, cfg->kv_h2o_target_lossy_ratio());
     meta->h2o_ema_alpha = ALIMIN(1.0f, ALIMAX(0.0f, cfg->kv_h2o_ema_alpha()));
     meta->h2o_update_interval = ALIMAX(1, cfg->kv_h2o_update_interval());
     meta->h2o_trigger_min_tokens = ALIMAX(1, cfg->kv_h2o_trigger_min_tokens());
     meta->h2o_log_stats = cfg->kv_h2o_log_stats() ? 1 : 0;
     meta->h2o_lossless_enable = cfg->kv_lossless_enable() ? 1 : 0;
+    const auto scope = cfg->kv_lossless_scope();
+    if (scope == "none") {
+        meta->h2o_lossless_scope = 0;
+    } else if (scope == "h2o_kept") {
+        meta->h2o_lossless_scope = 2;
+    } else {
+        meta->h2o_lossless_scope = 1;
+    }
+    meta->h2o_lossless_front_n = ALIMAX(0, cfg->kv_lossless_front_n());
     const auto codec = cfg->kv_lossless_codec();
     meta->h2o_lossless_codec = (codec == "gear_delta") ? 1 : 0;
     meta->h2o_in_decode = 0;
@@ -575,6 +589,9 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mContext->h2o_keep_ratio = mMeta->h2o_keep_ratio;
     mContext->h2o_lossy_ratio = mMeta->h2o_lossy_ratio;
     mContext->h2o_lossless_ratio = mMeta->h2o_lossless_ratio;
+    mContext->h2o_target_keep_effective = mMeta->h2o_target_keep_effective;
+    mContext->h2o_floor_keep_by_recent_sink = mMeta->h2o_floor_keep_by_recent_sink;
+    mContext->h2o_block_quantized_keep = mMeta->h2o_block_quantized_keep;
     mContext->h2o_evict_us = mMeta->h2o_evict_us;
     mContext->h2o_codec_us = mMeta->h2o_codec_us;
     mContext->h2o_last_evict_tokens = mMeta->h2o_last_evict_tokens;
@@ -718,6 +735,9 @@ void Llm::reset() {
     mContext->h2o_keep_ratio = 1.0f;
     mContext->h2o_lossy_ratio = 1.0f;
     mContext->h2o_lossless_ratio = 1.0f;
+    mContext->h2o_target_keep_effective = 1.0f;
+    mContext->h2o_floor_keep_by_recent_sink = 1.0f;
+    mContext->h2o_block_quantized_keep = 1.0f;
     mContext->h2o_evict_us = 0;
     mContext->h2o_codec_us = 0;
     mContext->h2o_last_evict_tokens = 0;
