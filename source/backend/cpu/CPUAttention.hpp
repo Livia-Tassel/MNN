@@ -32,18 +32,15 @@ private:
     struct H2OSharedState {
         struct LayerState {
             std::vector<float> blockScores;
-            int64_t step = 0;
-            int64_t lastTriggerStep = 0;
-            int64_t lastLosslessStep = 0;
-            float lastLosslessRatio = 1.0f;
-            int64_t lastLosslessCodecUs = 0;
         };
         std::vector<LayerState> layerStates;
         std::vector<int> reserveStorage;
         int64_t decodeLayerCursor = 0;
-        double losslessRatioSum = 0.0;
-        int losslessRatioCount = 0;
-        int64_t losslessCodecUsSum = 0;
+        int64_t globalStep = 0;
+        int64_t globalLastTriggerStep = 0;
+        int64_t globalLastLosslessStep = 0;
+        float globalLastLosslessRatio = 1.0f;
+        int64_t globalLastLosslessCodecUs = 0;
     };
 
     bool mKVCache        = true;

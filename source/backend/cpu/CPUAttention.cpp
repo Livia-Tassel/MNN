@@ -438,11 +438,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
         layerIndex = static_cast<int>(mH2OState->decodeLayerCursor % static_cast<int64_t>(layerCount));
         mH2OState->decodeLayerCursor += 1;
-        if (layerIndex == 0) {
-            mH2OState->losslessRatioSum = 0.0;
-            mH2OState->losslessRatioCount = 0;
-            mH2OState->losslessCodecUsSum = 0;
-        }
+        mH2OState->globalStep += 1;
     }
     int h2oLayerStart = 0;
     int h2oLayerEnd = layerCount - 1;
@@ -920,38 +916,39 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     MNN_CONCURRENCY_END();
 
     int finalKeepTokensForLayer = kvSeqLen;
-    CPUAttention::H2OSharedState::LayerState* layerStatePtr = nullptr;
+    CPUAttention::H2OSharedState::LayerState* scoreStatePtr = nullptr;
     if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
-        if ((int)mH2OState->layerStates.size() != layerCount) {
+        // Keep one global score state so trigger cadence is stable even if runtime
+        // does not expose per-layer execution boundaries.
+        if ((int)mH2OState->layerStates.size() != 1) {
             mH2OState->layerStates.clear();
-            mH2OState->layerStates.resize(layerCount);
+            mH2OState->layerStates.resize(1);
         }
-        layerStatePtr = &mH2OState->layerStates[layerIndex];
-        layerStatePtr->step += 1;
+        scoreStatePtr = &mH2OState->layerStates[0];
     }
 
-    if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && layerStatePtr != nullptr) {
-        auto& layerState = *layerStatePtr;
-        if ((int)layerState.blockScores.size() != h2oBlockCount) {
-            layerState.blockScores.resize(h2oBlockCount, 0.0f);
+    if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && scoreStatePtr != nullptr) {
+        auto& scoreState = *scoreStatePtr;
+        if ((int)scoreState.blockScores.size() != h2oBlockCount) {
+            scoreState.blockScores.resize(h2oBlockCount, 0.0f);
         }
 
         const float alpha = ALIMIN(1.0f, ALIMAX(0.0f, mMeta->h2o_ema_alpha));
         const float norm = (float)ALIMAX(1, mNumHead * seqLen);
         for (int i = 0; i < h2oBlockCount; ++i) {
             const float current = h2oBlockAcc[i] / norm;
-            layerState.blockScores[i] = alpha * layerState.blockScores[i] + (1.0f - alpha) * current;
+            scoreState.blockScores[i] = alpha * scoreState.blockScores[i] + (1.0f - alpha) * current;
         }
 
         const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
         const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
         const bool shouldTrigger = kvSeqLen >= triggerMin
-            && (layerState.step - layerState.lastTriggerStep >= updateInterval);
+            && (mH2OState->globalStep - mH2OState->globalLastTriggerStep >= updateInterval);
 
         mMeta->h2o_last_evict_tokens = 0;
         mMeta->h2o_evict_us = 0;
         if (shouldTrigger) {
-            layerState.lastTriggerStep = layerState.step;
+            mH2OState->globalLastTriggerStep = mH2OState->globalStep;
             auto t0 = std::chrono::high_resolution_clock::now();
 
             std::vector<char> keepBlock(h2oBlockCount, 0);
@@ -1004,7 +1001,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 candidates.reserve(h2oBlockCount);
                 for (int i = 0; i < h2oBlockCount; ++i) {
                     if (!keepBlock[i]) {
-                        candidates.emplace_back(layerState.blockScores[i], i);
+                        candidates.emplace_back(scoreState.blockScores[i], i);
                     }
                 }
                 std::sort(candidates.begin(), candidates.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
@@ -1095,7 +1092,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         }
     }
 
-    if (layerStatePtr != nullptr && mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
+    if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
         auto estimateLosslessRatio = [&](int tokenBudget) -> float {
             if (mMeta->h2o_lossless_codec != 1 || mBytes != 2 || tokenBudget <= 0 || kvSeqLen <= 0) {
                 return 1.0f;
@@ -1145,27 +1142,20 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
             const bool shouldUpdateLossless = kvSeqLen >= triggerMin
-                && (layerStatePtr->step - layerStatePtr->lastLosslessStep >= updateInterval);
-            if (shouldUpdateLossless || layerStatePtr->lastLosslessRatio <= 1.0f) {
+                && (mH2OState->globalStep - mH2OState->globalLastLosslessStep >= updateInterval);
+            if (shouldUpdateLossless || mH2OState->globalLastLosslessRatio <= 1.0f) {
                 auto c0 = std::chrono::high_resolution_clock::now();
-                layerStatePtr->lastLosslessRatio = estimateLosslessRatio(losslessTokenBudget);
+                mH2OState->globalLastLosslessRatio = estimateLosslessRatio(losslessTokenBudget);
                 auto c1 = std::chrono::high_resolution_clock::now();
-                layerStatePtr->lastLosslessCodecUs =
+                mH2OState->globalLastLosslessCodecUs =
                     (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(c1 - c0).count();
-                layerStatePtr->lastLosslessStep = layerStatePtr->step;
+                mH2OState->globalLastLosslessStep = mH2OState->globalStep;
             }
-            mH2OState->losslessRatioSum += layerStatePtr->lastLosslessRatio;
-            mH2OState->losslessRatioCount += 1;
-            mH2OState->losslessCodecUsSum += layerStatePtr->lastLosslessCodecUs;
-        }
-        if (layerIndex == layerCount - 1) {
-            if (mH2OState->losslessRatioCount > 0) {
-                mMeta->h2o_lossless_ratio = (float)(mH2OState->losslessRatioSum / (double)mH2OState->losslessRatioCount);
-                mMeta->h2o_codec_us = mH2OState->losslessCodecUsSum / mH2OState->losslessRatioCount;
-            } else {
-                mMeta->h2o_lossless_ratio = 1.0f;
-                mMeta->h2o_codec_us = 0;
-            }
+            mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
+            mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
+        } else {
+            mMeta->h2o_lossless_ratio = 1.0f;
+            mMeta->h2o_codec_us = 0;
         }
     }
 
