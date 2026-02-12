@@ -4,12 +4,24 @@ import json
 import os
 from pathlib import Path
 
-import numpy as np
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 try:
     import zstandard as zstd
 except Exception:
     zstd = None
+
+
+VALID_PREDICTORS = {
+    "raw",
+    "delta_seq",
+    "xor_seq",
+    "pair_delta",
+    "pair_delta_delta_seq",
+}
 
 
 def iter_meta_files(root):
@@ -29,6 +41,23 @@ def parse_layer_ids(text):
             continue
         ids.add(int(part))
     return ids
+
+
+def parse_predictor_list(text, arg_name):
+    items = []
+    seen = set()
+    for part in text.split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if name not in VALID_PREDICTORS:
+            raise SystemExit(f"{arg_name}: invalid predictor `{name}`")
+        if name not in seen:
+            items.append(name)
+            seen.add(name)
+    if not items:
+        raise SystemExit(f"{arg_name}: predictor list is empty")
+    return items
 
 
 def should_keep_stage(meta_stage, target_stage):
@@ -51,31 +80,182 @@ def should_keep_layer(layer_id, args, layer_id_set):
     return False
 
 
-def delta_stream_u8(arr_u8, seq_len, heads, head_dim):
+def delta_seq_block_u8(block):
+    seq_len = block.shape[0]
     if seq_len <= 1:
-        return arr_u8.tobytes()
-    view = arr_u8.reshape((seq_len, heads, head_dim))
-    first = view[0:1]
-    delta = (view[1:].astype(np.int16) - view[:-1].astype(np.int16)) & 0xFF
+        return block
+    first = block[0:1]
+    delta = (block[1:].astype(np.int16) - block[:-1].astype(np.int16)) & 0xFF
     delta = delta.astype(np.uint8)
-    return np.concatenate([first, delta], axis=0).tobytes()
+    return np.concatenate([first, delta], axis=0)
 
 
-def gear_delta_compressed_size_fp16(fp16_bytes, seq_len, heads, head_dim, compressor):
+def xor_seq_block_u8(block):
+    seq_len = block.shape[0]
+    if seq_len <= 1:
+        return block
+    first = block[0:1]
+    xored = np.bitwise_xor(block[1:], block[:-1])
+    return np.concatenate([first, xored], axis=0)
+
+
+def pair_delta_block_u8(block):
+    head_dim = block.shape[-1]
+    if head_dim <= 1:
+        return block
+    out = block.copy()
+    left = out[..., 0::2]
+    right = out[..., 1::2]
+    if right.size == 0:
+        return out
+    left_base = left[..., : right.shape[-1]]
+    right_delta = (right.astype(np.int16) - left_base.astype(np.int16)) & 0xFF
+    out[..., 1::2] = right_delta.astype(np.uint8)
+    return out
+
+
+def apply_predictor(block_u8, predictor):
+    if predictor == "raw":
+        return block_u8
+    if predictor == "delta_seq":
+        return delta_seq_block_u8(block_u8)
+    if predictor == "xor_seq":
+        return xor_seq_block_u8(block_u8)
+    if predictor == "pair_delta":
+        return pair_delta_block_u8(block_u8)
+    if predictor == "pair_delta_delta_seq":
+        return delta_seq_block_u8(pair_delta_block_u8(block_u8))
+    raise ValueError(f"unsupported predictor: {predictor}")
+
+
+def bitshuffle_u8_bytes(data_bytes):
+    if not data_bytes:
+        return data_bytes
+    arr = np.frombuffer(data_bytes, dtype=np.uint8)
+    bits = np.unpackbits(arr, bitorder="little").reshape(arr.size, 8)
+    shuffled = bits.T.reshape(-1)
+    return np.packbits(shuffled, bitorder="little").tobytes()
+
+
+def compress_stream_legacy(stream_u8, predictor, compressor, use_bitshuffle):
+    transformed = apply_predictor(stream_u8, predictor)
+    payload = np.ascontiguousarray(transformed).reshape(-1).tobytes()
+    if use_bitshuffle:
+        payload = bitshuffle_u8_bytes(payload)
+    compressed_size = len(compressor.compress(payload))
+    diag = {
+        "mode": "legacy",
+        "predictor": predictor,
+        "blocks": 1,
+        "mode_counts": {predictor: 1},
+        "data_compressed_bytes": compressed_size,
+        "mode_bytes": 0,
+        "header_bytes": 0,
+        "stream_total_bytes": compressed_size,
+    }
+    return compressed_size, diag
+
+
+def compress_stream_adaptive(stream_u8, predictors, block_seq, compressor, use_bitshuffle):
+    seq_len = int(stream_u8.shape[0])
+    if seq_len <= 0:
+        return 0, {
+            "mode": "adaptive_v22",
+            "predictors": predictors,
+            "blocks": 0,
+            "mode_counts": {name: 0 for name in predictors},
+            "data_compressed_bytes": 0,
+            "mode_bytes": 0,
+            "header_bytes": 0,
+            "stream_total_bytes": 0,
+        }
+
+    real_block_seq = max(1, min(int(block_seq), seq_len))
+    transformed_chunks = []
+    mode_ids = []
+    mode_counts = {name: 0 for name in predictors}
+
+    for start in range(0, seq_len, real_block_seq):
+        block = stream_u8[start : start + real_block_seq]
+        best_name = None
+        best_payload = None
+        best_size = None
+        for name in predictors:
+            transformed = apply_predictor(block, name)
+            payload = np.ascontiguousarray(transformed).reshape(-1).tobytes()
+            if use_bitshuffle:
+                payload = bitshuffle_u8_bytes(payload)
+            size = len(compressor.compress(payload))
+            if best_size is None or size < best_size:
+                best_size = size
+                best_name = name
+                best_payload = payload
+        transformed_chunks.append(best_payload)
+        mode_ids.append(predictors.index(best_name))
+        mode_counts[best_name] += 1
+
+    merged_payload = b"".join(transformed_chunks)
+    data_compressed_bytes = len(compressor.compress(merged_payload)) if merged_payload else 0
+    mode_bytes = len(mode_ids)  # one mode byte per block
+    header_bytes = 8            # block_seq + predictor_count + reserved metadata
+    stream_total_bytes = data_compressed_bytes + mode_bytes + header_bytes
+
+    diag = {
+        "mode": "adaptive_v22",
+        "predictors": predictors,
+        "block_seq": real_block_seq,
+        "blocks": len(mode_ids),
+        "mode_counts": mode_counts,
+        "data_compressed_bytes": data_compressed_bytes,
+        "mode_bytes": mode_bytes,
+        "header_bytes": header_bytes,
+        "stream_total_bytes": stream_total_bytes,
+    }
+    return stream_total_bytes, diag
+
+
+def compress_tensor_fp16(fp16_bytes, seq_len, heads, head_dim, compressor, args, tensor_name):
     expected_bytes = seq_len * heads * head_dim * 2
     if len(fp16_bytes) != expected_bytes:
         raise ValueError(
-            f"size mismatch: got={len(fp16_bytes)} expected={expected_bytes} "
+            f"{tensor_name}: size mismatch got={len(fp16_bytes)} expected={expected_bytes} "
             f"(seq={seq_len}, heads={heads}, dim={head_dim})"
         )
-    u16 = np.frombuffer(fp16_bytes, dtype=np.uint16)
-    hi = (u16 >> 8).astype(np.uint8)
+
+    u16 = np.frombuffer(fp16_bytes, dtype=np.uint16).reshape((seq_len, heads, head_dim))
+    hi = ((u16 >> 8) & 0xFF).astype(np.uint8)
     lo = (u16 & 0xFF).astype(np.uint8)
-    hi_delta_bytes = delta_stream_u8(hi, seq_len, heads, head_dim)
-    lo_bytes = lo.tobytes()
-    hi_delta_c = compressor.compress(hi_delta_bytes)
-    lo_c = compressor.compress(lo_bytes)
-    return len(hi_delta_c) + len(lo_c)
+
+    if args.codec_mode == "legacy":
+        hi_size, hi_diag = compress_stream_legacy(
+            hi, predictor="delta_seq", compressor=compressor, use_bitshuffle=args.bitshuffle
+        )
+        lo_size, lo_diag = compress_stream_legacy(
+            lo, predictor="raw", compressor=compressor, use_bitshuffle=args.bitshuffle
+        )
+    else:
+        if tensor_name == "k":
+            hi_predictors = args.k_hi_predictors_list
+            lo_predictors = args.k_lo_predictors_list
+        else:
+            hi_predictors = args.v_hi_predictors_list
+            lo_predictors = args.v_lo_predictors_list
+        hi_size, hi_diag = compress_stream_adaptive(
+            hi,
+            predictors=hi_predictors,
+            block_seq=args.adaptive_block_seq,
+            compressor=compressor,
+            use_bitshuffle=args.bitshuffle,
+        )
+        lo_size, lo_diag = compress_stream_adaptive(
+            lo,
+            predictors=lo_predictors,
+            block_seq=args.adaptive_block_seq,
+            compressor=compressor,
+            use_bitshuffle=args.bitshuffle,
+        )
+
+    return hi_size + lo_size, {"hi": hi_diag, "lo": lo_diag}
 
 
 def normalize_to_fp16(data, bytes_per_elem, strict_fp16):
@@ -96,6 +276,22 @@ def ratio(raw_bytes, compressed_bytes):
     return float(raw_bytes) / float(compressed_bytes)
 
 
+def ensure_not_overwrite(path, overwrite, label):
+    p = Path(path)
+    if p.exists() and not overwrite:
+        raise SystemExit(
+            f"{label} already exists: {p}\n"
+            f"Use a new output path or pass --overwrite."
+        )
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def merge_mode_counts(dst, src):
+    for mode_name, count in src.items():
+        dst[mode_name] = dst.get(mode_name, 0) + int(count)
+
+
 def write_markdown(path, result):
     with Path(path).open("w", encoding="utf-8") as f:
         f.write("# H2O v2 Offline Lossless Summary\n\n")
@@ -105,6 +301,8 @@ def write_markdown(path, result):
         f.write(f"- Selected entries: {result['selected_entries']}\n")
         f.write(f"- Selected layers: {result['selected_layers']}\n")
         f.write(f"- Selected dumps: {result['selected_dumps']}\n")
+        f.write(f"- Codec mode: `{result['codec_mode']}`\n")
+        f.write(f"- Bitshuffle: `{result['bitshuffle']}`\n")
         f.write(f"- Zstd level: {result['zstd_level']}\n")
         f.write(f"- Codec: `{result['codec']}`\n\n")
         f.write("## Ratios\n\n")
@@ -119,6 +317,11 @@ def write_markdown(path, result):
         f.write(f"- V compressed bytes: {result['v_compressed_bytes']}\n")
         f.write(f"- Total raw bytes: {result['raw_bytes']}\n")
         f.write(f"- Total compressed bytes: {result['compressed_bytes']}\n\n")
+        f.write("## Predictor Usage (Adaptive)\n\n")
+        f.write(f"- K hi mode counts: {result['k_hi_mode_counts']}\n")
+        f.write(f"- K lo mode counts: {result['k_lo_mode_counts']}\n")
+        f.write(f"- V hi mode counts: {result['v_hi_mode_counts']}\n")
+        f.write(f"- V lo mode counts: {result['v_lo_mode_counts']}\n\n")
         f.write("## Diagnostics\n\n")
         f.write(f"- Scanned entries: {result['scanned_entries']}\n")
         f.write(f"- Converted fp32->fp16 entries: {result['converted_fp32_entries']}\n")
@@ -130,10 +333,13 @@ def write_markdown(path, result):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Offline lossless ratio eval for H2O v2 front layers (FP16 gear+delta+zstd).")
+    parser = argparse.ArgumentParser(
+        description="Offline lossless ratio eval for H2O v2 front layers (FP16, v2.2 adaptive lossless codec)."
+    )
     parser.add_argument("--dump-dir", required=True, help="Root directory containing meta_*.json and KV binary files.")
     parser.add_argument("--out-json", required=True, help="Output json path for offline lossless metrics.")
     parser.add_argument("--out-md", default="", help="Optional markdown summary path.")
+    parser.add_argument("--overwrite", action="store_true", help="Allow overwriting existing out-json/out-md.")
     parser.add_argument("--stage", choices=["prefill", "decode", "both"], default="both")
     parser.add_argument("--scope", choices=["front_n", "layer_range", "layer_ids"], default="front_n")
     parser.add_argument("--front-n", type=int, default=2, help="Used when scope=front_n, keep layers [0, front_n).")
@@ -144,17 +350,54 @@ def main():
     parser.add_argument("--strict-fp16", action="store_true", help="If set, skip entries with bytes_per_elem=4 instead of converting.")
     parser.add_argument("--min-seq-len", type=int, default=0)
     parser.add_argument("--max-seq-len", type=int, default=0)
+    parser.add_argument("--codec-mode", choices=["legacy", "adaptive_v22"], default="adaptive_v22")
+    parser.add_argument("--adaptive-block-seq", type=int, default=64, help="Seq block size for adaptive predictor selection.")
+    parser.add_argument("--bitshuffle", action="store_true", help="Apply bitshuffle before zstd on transformed streams.")
+    parser.add_argument(
+        "--k-hi-predictors",
+        default="raw,delta_seq,xor_seq,pair_delta,pair_delta_delta_seq",
+        help="Comma list for K-hi predictor candidates (adaptive mode).",
+    )
+    parser.add_argument(
+        "--k-lo-predictors",
+        default="raw,delta_seq,xor_seq,pair_delta,pair_delta_delta_seq",
+        help="Comma list for K-lo predictor candidates (adaptive mode).",
+    )
+    parser.add_argument(
+        "--v-hi-predictors",
+        default="raw,delta_seq,xor_seq",
+        help="Comma list for V-hi predictor candidates (adaptive mode).",
+    )
+    parser.add_argument(
+        "--v-lo-predictors",
+        default="raw,delta_seq,xor_seq",
+        help="Comma list for V-lo predictor candidates (adaptive mode).",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     if zstd is None:
         raise SystemExit("Missing dependency: zstandard. Install with `pip install zstandard`.")
+    if np is None:
+        raise SystemExit("Missing dependency: numpy. Install with `pip install numpy`.")
     if args.scope == "front_n" and args.front_n <= 0:
         raise SystemExit("--front-n must be > 0 when scope=front_n.")
+    if args.adaptive_block_seq <= 0:
+        raise SystemExit("--adaptive-block-seq must be > 0.")
+
+    args.k_hi_predictors_list = parse_predictor_list(args.k_hi_predictors, "--k-hi-predictors")
+    args.k_lo_predictors_list = parse_predictor_list(args.k_lo_predictors, "--k-lo-predictors")
+    args.v_hi_predictors_list = parse_predictor_list(args.v_hi_predictors, "--v-hi-predictors")
+    args.v_lo_predictors_list = parse_predictor_list(args.v_lo_predictors, "--v-lo-predictors")
 
     layer_id_set = parse_layer_ids(args.layer_ids)
     if args.scope == "layer_ids" and not layer_id_set:
         raise SystemExit("--layer-ids must be non-empty when scope=layer_ids.")
+
+    out_json_path = ensure_not_overwrite(args.out_json, args.overwrite, "out-json")
+    out_md_path = None
+    if args.out_md:
+        out_md_path = ensure_not_overwrite(args.out_md, args.overwrite, "out-md")
 
     meta_files = sorted(iter_meta_files(args.dump_dir))
     if not meta_files:
@@ -174,6 +417,11 @@ def main():
     k_compressed_bytes = 0
     v_raw_bytes = 0
     v_compressed_bytes = 0
+
+    k_hi_mode_counts = {}
+    k_lo_mode_counts = {}
+    v_hi_mode_counts = {}
+    v_lo_mode_counts = {}
 
     def skip(reason):
         nonlocal skipped_entries
@@ -239,8 +487,8 @@ def main():
             converted_fp32_entries += 1
 
         try:
-            k_comp = gear_delta_compressed_size_fp16(k_fp16, seq_len, kv_heads, head_dim, compressor)
-            v_comp = gear_delta_compressed_size_fp16(v_fp16, seq_len, kv_heads, head_dim, compressor)
+            k_comp, k_diag = compress_tensor_fp16(k_fp16, seq_len, kv_heads, head_dim, compressor, args, tensor_name="k")
+            v_comp, v_diag = compress_tensor_fp16(v_fp16, seq_len, kv_heads, head_dim, compressor, args, tensor_name="v")
         except Exception:
             skip("compression_failed")
             continue
@@ -258,6 +506,11 @@ def main():
         v_raw_bytes += len(v_fp16)
         v_compressed_bytes += v_comp
 
+        merge_mode_counts(k_hi_mode_counts, k_diag["hi"]["mode_counts"])
+        merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
+        merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
+        merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
+
     if selected_entries == 0:
         raise SystemExit("No entries selected after filtering. Check --dump-dir/--stage/--scope options.")
 
@@ -268,7 +521,7 @@ def main():
     lossless_ratio = ratio(raw_bytes, compressed_bytes)
 
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dump_dir": str(Path(args.dump_dir).resolve()),
         "stage": args.stage,
         "scope": args.scope,
@@ -279,7 +532,14 @@ def main():
         "selected_layers": sorted(selected_layers),
         "selected_entries": int(selected_entries),
         "selected_dumps": int(len(selected_dumps)),
-        "codec": "fp16_gear_delta_zstd",
+        "codec": "fp16_gear_predictive_zstd",
+        "codec_mode": args.codec_mode,
+        "bitshuffle": bool(args.bitshuffle),
+        "adaptive_block_seq": int(args.adaptive_block_seq),
+        "k_hi_predictors": args.k_hi_predictors_list,
+        "k_lo_predictors": args.k_lo_predictors_list,
+        "v_hi_predictors": args.v_hi_predictors_list,
+        "v_lo_predictors": args.v_lo_predictors_list,
         "zstd_level": int(args.zstd_level),
         "k_raw_bytes": int(k_raw_bytes),
         "k_compressed_bytes": int(k_compressed_bytes),
@@ -291,20 +551,20 @@ def main():
         "v_lossless_ratio": float(v_lossless_ratio),
         "lossless_ratio": float(lossless_ratio),
         "weighted_lossless_ratio": float(lossless_ratio),
+        "k_hi_mode_counts": k_hi_mode_counts,
+        "k_lo_mode_counts": k_lo_mode_counts,
+        "v_hi_mode_counts": v_hi_mode_counts,
+        "v_lo_mode_counts": v_lo_mode_counts,
         "scanned_entries": int(scanned_entries),
         "converted_fp32_entries": int(converted_fp32_entries),
         "skipped_entries": int(skipped_entries),
         "skip_reasons": skip_reasons,
     }
 
-    out_json_path = Path(args.out_json)
-    out_json_path.parent.mkdir(parents=True, exist_ok=True)
     out_json_path.write_text(json.dumps(result, ensure_ascii=True, indent=2), encoding="utf-8")
     print(f"Wrote {out_json_path}")
 
-    if args.out_md:
-        out_md_path = Path(args.out_md)
-        out_md_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_md_path is not None:
         write_markdown(out_md_path, result)
         print(f"Wrote {out_md_path}")
 
@@ -313,6 +573,10 @@ def main():
             f"[offline_lossless_fp16] selected={selected_entries} "
             f"layers={len(selected_layers)} ratio={lossless_ratio:.4f} "
             f"k={k_lossless_ratio:.4f} v={v_lossless_ratio:.4f}"
+        )
+        print(
+            f"[offline_lossless_fp16] mode={args.codec_mode} "
+            f"bitshuffle={int(args.bitshuffle)} block_seq={args.adaptive_block_seq}"
         )
 
 
