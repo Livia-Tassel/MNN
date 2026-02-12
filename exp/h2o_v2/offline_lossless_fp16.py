@@ -196,8 +196,8 @@ def compress_stream_adaptive(stream_u8, predictors, block_seq, compressor, use_b
 
     merged_payload = b"".join(transformed_chunks)
     data_compressed_bytes = len(compressor.compress(merged_payload)) if merged_payload else 0
-    mode_bytes = len(mode_ids)  # one mode byte per block
-    header_bytes = 8            # block_seq + predictor_count + reserved metadata
+    mode_bytes = len(mode_ids)
+    header_bytes = 8
     stream_total_bytes = data_compressed_bytes + mode_bytes + header_bytes
 
     diag = {
@@ -214,48 +214,101 @@ def compress_stream_adaptive(stream_u8, predictors, block_seq, compressor, use_b
     return stream_total_bytes, diag
 
 
-def compress_tensor_fp16(fp16_bytes, seq_len, heads, head_dim, compressor, args, tensor_name):
+def get_predictors_for_stream(args, tensor_name, stream_name):
+    if tensor_name == "k":
+        return args.k_hi_predictors_list if stream_name == "hi" else args.k_lo_predictors_list
+    return args.v_hi_predictors_list if stream_name == "hi" else args.v_lo_predictors_list
+
+
+def compress_stream(stream_u8, tensor_name, stream_name, args, compressor):
+    if args.codec_mode == "legacy":
+        predictor = "delta_seq" if stream_name == "hi" else "raw"
+        return compress_stream_legacy(stream_u8, predictor, compressor, use_bitshuffle=args.bitshuffle)
+    predictors = get_predictors_for_stream(args, tensor_name, stream_name)
+    return compress_stream_adaptive(
+        stream_u8,
+        predictors=predictors,
+        block_seq=args.adaptive_block_seq,
+        compressor=compressor,
+        use_bitshuffle=args.bitshuffle,
+    )
+
+
+def compress_tensor_from_u16(u16_tensor, args, compressor, tensor_name, chunk_count, include_chunk_meta):
+    seq_len, heads, head_dim = u16_tensor.shape
+    hi = ((u16_tensor >> 8) & 0xFF).astype(np.uint8)
+    lo = (u16_tensor & 0xFF).astype(np.uint8)
+
+    hi_size, hi_diag = compress_stream(hi, tensor_name, "hi", args, compressor)
+    lo_size, lo_diag = compress_stream(lo, tensor_name, "lo", args, compressor)
+
+    chunk_meta_bytes = 0
+    if include_chunk_meta:
+        # Minimal metadata for reversible regrouping: chunk_count + per-chunk seq_len.
+        chunk_meta_bytes = 4 + 4 * int(chunk_count)
+
+    total = hi_size + lo_size + chunk_meta_bytes
+    diag = {
+        "tensor_name": tensor_name,
+        "seq_len_total": int(seq_len),
+        "heads": int(heads),
+        "head_dim": int(head_dim),
+        "chunk_count": int(chunk_count),
+        "chunk_meta_bytes": int(chunk_meta_bytes),
+        "hi": hi_diag,
+        "lo": lo_diag,
+    }
+    return total, diag
+
+
+def compress_single_entry_fp16(fp16_bytes, seq_len, heads, head_dim, args, compressor, tensor_name):
     expected_bytes = seq_len * heads * head_dim * 2
     if len(fp16_bytes) != expected_bytes:
         raise ValueError(
             f"{tensor_name}: size mismatch got={len(fp16_bytes)} expected={expected_bytes} "
             f"(seq={seq_len}, heads={heads}, dim={head_dim})"
         )
-
     u16 = np.frombuffer(fp16_bytes, dtype=np.uint16).reshape((seq_len, heads, head_dim))
-    hi = ((u16 >> 8) & 0xFF).astype(np.uint8)
-    lo = (u16 & 0xFF).astype(np.uint8)
+    return compress_tensor_from_u16(
+        u16,
+        args=args,
+        compressor=compressor,
+        tensor_name=tensor_name,
+        chunk_count=1,
+        include_chunk_meta=False,
+    )
 
-    if args.codec_mode == "legacy":
-        hi_size, hi_diag = compress_stream_legacy(
-            hi, predictor="delta_seq", compressor=compressor, use_bitshuffle=args.bitshuffle
-        )
-        lo_size, lo_diag = compress_stream_legacy(
-            lo, predictor="raw", compressor=compressor, use_bitshuffle=args.bitshuffle
-        )
+
+def compress_grouped_entries_fp16(entries, args, compressor, tensor_name):
+    if not entries:
+        raise ValueError("empty group")
+    heads = int(entries[0]["kv_heads"])
+    head_dim = int(entries[0]["head_dim"])
+    chunks = []
+    for entry in entries:
+        if int(entry["kv_heads"]) != heads or int(entry["head_dim"]) != head_dim:
+            raise ValueError("inconsistent heads/head_dim in aggregate group")
+        seq_len = int(entry["seq_len"])
+        fp16_bytes = entry["k_fp16"] if tensor_name == "k" else entry["v_fp16"]
+        expected_bytes = seq_len * heads * head_dim * 2
+        if len(fp16_bytes) != expected_bytes:
+            raise ValueError(
+                f"{tensor_name}: size mismatch in aggregate group "
+                f"got={len(fp16_bytes)} expected={expected_bytes}"
+            )
+        chunks.append(np.frombuffer(fp16_bytes, dtype=np.uint16).reshape((seq_len, heads, head_dim)))
+    if len(chunks) == 1:
+        u16 = chunks[0]
     else:
-        if tensor_name == "k":
-            hi_predictors = args.k_hi_predictors_list
-            lo_predictors = args.k_lo_predictors_list
-        else:
-            hi_predictors = args.v_hi_predictors_list
-            lo_predictors = args.v_lo_predictors_list
-        hi_size, hi_diag = compress_stream_adaptive(
-            hi,
-            predictors=hi_predictors,
-            block_seq=args.adaptive_block_seq,
-            compressor=compressor,
-            use_bitshuffle=args.bitshuffle,
-        )
-        lo_size, lo_diag = compress_stream_adaptive(
-            lo,
-            predictors=lo_predictors,
-            block_seq=args.adaptive_block_seq,
-            compressor=compressor,
-            use_bitshuffle=args.bitshuffle,
-        )
-
-    return hi_size + lo_size, {"hi": hi_diag, "lo": lo_diag}
+        u16 = np.concatenate(chunks, axis=0)
+    return compress_tensor_from_u16(
+        u16,
+        args=args,
+        compressor=compressor,
+        tensor_name=tensor_name,
+        chunk_count=len(entries),
+        include_chunk_meta=True,
+    )
 
 
 def normalize_to_fp16(data, bytes_per_elem, strict_fp16):
@@ -292,6 +345,21 @@ def merge_mode_counts(dst, src):
         dst[mode_name] = dst.get(mode_name, 0) + int(count)
 
 
+def make_group_key(entry, aggregate_by_stage):
+    run_id = entry.get("run_id", "")
+    if not isinstance(run_id, str) or not run_id:
+        run_id = "__no_run_id__"
+    key = [
+        run_id,
+        int(entry["layer_id"]),
+        int(entry["kv_heads"]),
+        int(entry["head_dim"]),
+    ]
+    if aggregate_by_stage:
+        key.append(str(entry["stage"]))
+    return tuple(key)
+
+
 def write_markdown(path, result):
     with Path(path).open("w", encoding="utf-8") as f:
         f.write("# H2O v2 Offline Lossless Summary\n\n")
@@ -301,6 +369,9 @@ def write_markdown(path, result):
         f.write(f"- Selected entries: {result['selected_entries']}\n")
         f.write(f"- Selected layers: {result['selected_layers']}\n")
         f.write(f"- Selected dumps: {result['selected_dumps']}\n")
+        f.write(f"- Entry mode: `{result['entry_mode']}`\n")
+        f.write(f"- Aggregate by stage: `{result['aggregate_by_stage']}`\n")
+        f.write(f"- Aggregate groups: {result['aggregate_groups']}\n")
         f.write(f"- Codec mode: `{result['codec_mode']}`\n")
         f.write(f"- Bitshuffle: `{result['bitshuffle']}`\n")
         f.write(f"- Zstd level: {result['zstd_level']}\n")
@@ -315,9 +386,11 @@ def write_markdown(path, result):
         f.write(f"- K compressed bytes: {result['k_compressed_bytes']}\n")
         f.write(f"- V raw bytes: {result['v_raw_bytes']}\n")
         f.write(f"- V compressed bytes: {result['v_compressed_bytes']}\n")
+        f.write(f"- K chunk metadata bytes: {result['k_chunk_meta_bytes']}\n")
+        f.write(f"- V chunk metadata bytes: {result['v_chunk_meta_bytes']}\n")
         f.write(f"- Total raw bytes: {result['raw_bytes']}\n")
         f.write(f"- Total compressed bytes: {result['compressed_bytes']}\n\n")
-        f.write("## Predictor Usage (Adaptive)\n\n")
+        f.write("## Predictor Usage\n\n")
         f.write(f"- K hi mode counts: {result['k_hi_mode_counts']}\n")
         f.write(f"- K lo mode counts: {result['k_lo_mode_counts']}\n")
         f.write(f"- V hi mode counts: {result['v_hi_mode_counts']}\n")
@@ -334,7 +407,7 @@ def write_markdown(path, result):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Offline lossless ratio eval for H2O v2 front layers (FP16, v2.2 adaptive lossless codec)."
+        description="Offline lossless ratio eval for H2O v2 front layers (FP16 predictive codec)."
     )
     parser.add_argument("--dump-dir", required=True, help="Root directory containing meta_*.json and KV binary files.")
     parser.add_argument("--out-json", required=True, help="Output json path for offline lossless metrics.")
@@ -350,6 +423,8 @@ def main():
     parser.add_argument("--strict-fp16", action="store_true", help="If set, skip entries with bytes_per_elem=4 instead of converting.")
     parser.add_argument("--min-seq-len", type=int, default=0)
     parser.add_argument("--max-seq-len", type=int, default=0)
+    parser.add_argument("--entry-mode", choices=["per_meta", "aggregate"], default="per_meta")
+    parser.add_argument("--aggregate-by-stage", action="store_true", help="When aggregating, split groups by stage.")
     parser.add_argument("--codec-mode", choices=["legacy", "adaptive_v22"], default="adaptive_v22")
     parser.add_argument("--adaptive-block-seq", type=int, default=64, help="Seq block size for adaptive predictor selection.")
     parser.add_argument("--bitshuffle", action="store_true", help="Apply bitshuffle before zstd on transformed streams.")
@@ -406,28 +481,19 @@ def main():
     compressor = zstd.ZstdCompressor(level=args.zstd_level)
 
     scanned_entries = 0
-    selected_entries = 0
     converted_fp32_entries = 0
-    selected_layers = set()
-    selected_dumps = set()
     skipped_entries = 0
     skip_reasons = {}
-
-    k_raw_bytes = 0
-    k_compressed_bytes = 0
-    v_raw_bytes = 0
-    v_compressed_bytes = 0
-
-    k_hi_mode_counts = {}
-    k_lo_mode_counts = {}
-    v_hi_mode_counts = {}
-    v_lo_mode_counts = {}
+    selected_layers = set()
+    selected_dumps = set()
+    selected_entries = []
 
     def skip(reason):
         nonlocal skipped_entries
         skipped_entries += 1
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
+    order_idx = 0
     for meta_path in meta_files:
         scanned_entries += 1
         try:
@@ -442,6 +508,7 @@ def main():
 
         try:
             layer_id = int(meta.get("layer_id", -1))
+            seq_start = int(meta.get("seq_start", 0))
             seq_len = int(meta.get("seq_len", 0))
             kv_heads = int(meta.get("kv_heads", 0))
             head_dim = int(meta.get("head_dim", 0))
@@ -486,33 +553,98 @@ def main():
         if k_norm_status == "fp32_to_fp16" or v_norm_status == "fp32_to_fp16":
             converted_fp32_entries += 1
 
-        try:
-            k_comp, k_diag = compress_tensor_fp16(k_fp16, seq_len, kv_heads, head_dim, compressor, args, tensor_name="k")
-            v_comp, v_diag = compress_tensor_fp16(v_fp16, seq_len, kv_heads, head_dim, compressor, args, tensor_name="v")
-        except Exception:
-            skip("compression_failed")
-            continue
-
-        selected_entries += 1
-        selected_layers.add(layer_id)
         run_id = meta.get("run_id")
-        if isinstance(run_id, str) and run_id:
+        if not isinstance(run_id, str):
+            run_id = ""
+
+        selected_entries.append(
+            {
+                "order_idx": order_idx,
+                "run_id": run_id,
+                "stage": stage,
+                "layer_id": layer_id,
+                "seq_start": seq_start,
+                "seq_len": seq_len,
+                "kv_heads": kv_heads,
+                "head_dim": head_dim,
+                "k_fp16": k_fp16,
+                "v_fp16": v_fp16,
+            }
+        )
+        order_idx += 1
+        selected_layers.add(layer_id)
+        if run_id:
             selected_dumps.add(run_id)
         else:
             selected_dumps.add(str(meta_path.parent))
 
-        k_raw_bytes += len(k_fp16)
-        k_compressed_bytes += k_comp
-        v_raw_bytes += len(v_fp16)
-        v_compressed_bytes += v_comp
-
-        merge_mode_counts(k_hi_mode_counts, k_diag["hi"]["mode_counts"])
-        merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
-        merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
-        merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
-
-    if selected_entries == 0:
+    if not selected_entries:
         raise SystemExit("No entries selected after filtering. Check --dump-dir/--stage/--scope options.")
+
+    k_raw_bytes = 0
+    k_compressed_bytes = 0
+    v_raw_bytes = 0
+    v_compressed_bytes = 0
+    k_chunk_meta_bytes = 0
+    v_chunk_meta_bytes = 0
+    k_hi_mode_counts = {}
+    k_lo_mode_counts = {}
+    v_hi_mode_counts = {}
+    v_lo_mode_counts = {}
+    aggregate_groups = 0
+
+    if args.entry_mode == "per_meta":
+        for entry in selected_entries:
+            seq_len = int(entry["seq_len"])
+            heads = int(entry["kv_heads"])
+            head_dim = int(entry["head_dim"])
+            k_raw_bytes += len(entry["k_fp16"])
+            v_raw_bytes += len(entry["v_fp16"])
+            try:
+                k_comp, k_diag = compress_single_entry_fp16(
+                    entry["k_fp16"], seq_len, heads, head_dim, args, compressor, tensor_name="k"
+                )
+                v_comp, v_diag = compress_single_entry_fp16(
+                    entry["v_fp16"], seq_len, heads, head_dim, args, compressor, tensor_name="v"
+                )
+            except Exception:
+                skip("compression_failed")
+                continue
+
+            k_compressed_bytes += k_comp
+            v_compressed_bytes += v_comp
+            k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
+            v_chunk_meta_bytes += int(v_diag.get("chunk_meta_bytes", 0))
+            merge_mode_counts(k_hi_mode_counts, k_diag["hi"]["mode_counts"])
+            merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
+            merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
+            merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
+    else:
+        groups = {}
+        for entry in selected_entries:
+            key = make_group_key(entry, aggregate_by_stage=args.aggregate_by_stage)
+            groups.setdefault(key, []).append(entry)
+        aggregate_groups = len(groups)
+
+        for _, entries in groups.items():
+            entries.sort(key=lambda x: (int(x["seq_start"]), int(x["order_idx"])))
+            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
+            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
+            try:
+                k_comp, k_diag = compress_grouped_entries_fp16(entries, args, compressor, tensor_name="k")
+                v_comp, v_diag = compress_grouped_entries_fp16(entries, args, compressor, tensor_name="v")
+            except Exception:
+                skip("compression_failed")
+                continue
+
+            k_compressed_bytes += k_comp
+            v_compressed_bytes += v_comp
+            k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
+            v_chunk_meta_bytes += int(v_diag.get("chunk_meta_bytes", 0))
+            merge_mode_counts(k_hi_mode_counts, k_diag["hi"]["mode_counts"])
+            merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
+            merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
+            merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
 
     raw_bytes = k_raw_bytes + v_raw_bytes
     compressed_bytes = k_compressed_bytes + v_compressed_bytes
@@ -521,7 +653,7 @@ def main():
     lossless_ratio = ratio(raw_bytes, compressed_bytes)
 
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "dump_dir": str(Path(args.dump_dir).resolve()),
         "stage": args.stage,
         "scope": args.scope,
@@ -530,8 +662,11 @@ def main():
         "layer_end": int(args.layer_end),
         "layer_ids": sorted(layer_id_set),
         "selected_layers": sorted(selected_layers),
-        "selected_entries": int(selected_entries),
+        "selected_entries": int(len(selected_entries)),
         "selected_dumps": int(len(selected_dumps)),
+        "entry_mode": args.entry_mode,
+        "aggregate_by_stage": bool(args.aggregate_by_stage),
+        "aggregate_groups": int(aggregate_groups),
         "codec": "fp16_gear_predictive_zstd",
         "codec_mode": args.codec_mode,
         "bitshuffle": bool(args.bitshuffle),
@@ -545,6 +680,8 @@ def main():
         "k_compressed_bytes": int(k_compressed_bytes),
         "v_raw_bytes": int(v_raw_bytes),
         "v_compressed_bytes": int(v_compressed_bytes),
+        "k_chunk_meta_bytes": int(k_chunk_meta_bytes),
+        "v_chunk_meta_bytes": int(v_chunk_meta_bytes),
         "raw_bytes": int(raw_bytes),
         "compressed_bytes": int(compressed_bytes),
         "k_lossless_ratio": float(k_lossless_ratio),
@@ -570,13 +707,9 @@ def main():
 
     if args.verbose:
         print(
-            f"[offline_lossless_fp16] selected={selected_entries} "
-            f"layers={len(selected_layers)} ratio={lossless_ratio:.4f} "
-            f"k={k_lossless_ratio:.4f} v={v_lossless_ratio:.4f}"
-        )
-        print(
-            f"[offline_lossless_fp16] mode={args.codec_mode} "
-            f"bitshuffle={int(args.bitshuffle)} block_seq={args.adaptive_block_seq}"
+            f"[offline_lossless_fp16] entry_mode={args.entry_mode} "
+            f"selected={len(selected_entries)} groups={aggregate_groups} "
+            f"ratio={lossless_ratio:.4f} k={k_lossless_ratio:.4f} v={v_lossless_ratio:.4f}"
         )
 
 
