@@ -150,6 +150,11 @@ static inline int clampInt(int value, int low, int high) {
     return ALIMAX(low, ALIMIN(high, value));
 }
 
+struct LosslessStatSample {
+    double rawBytes = 0.0;
+    double compressedBytes = 0.0;
+};
+
 static double byteEntropyBits(const std::array<uint32_t, 256>& hist, size_t total) {
     if (total == 0) {
         return 0.0;
@@ -194,6 +199,31 @@ static double estimateGearDeltaCompressedBytes(const uint8_t* data, size_t bytes
     const double overheadBytes = 64.0;
     const double compressed = (loBits + hiBits) / 8.0 + overheadBytes;
     return ALIMAX(1.0, compressed);
+}
+
+static LosslessStatSample estimateGearDeltaLosslessStats(const uint8_t* keyPtr,
+                                                         size_t keyBytes,
+                                                         const uint8_t* valuePtr,
+                                                         size_t valueBytes,
+                                                         size_t sampleCapBytes) {
+    LosslessStatSample sample;
+    if (keyPtr != nullptr && keyBytes >= 2) {
+        size_t keySampleBytes = ALIMIN(keyBytes, sampleCapBytes);
+        keySampleBytes = (keySampleBytes / 2) * 2;
+        if (keySampleBytes >= 2) {
+            sample.rawBytes += static_cast<double>(keySampleBytes);
+            sample.compressedBytes += estimateGearDeltaCompressedBytes(keyPtr, keySampleBytes);
+        }
+    }
+    if (valuePtr != nullptr && valueBytes >= 2) {
+        size_t valueSampleBytes = ALIMIN(valueBytes, sampleCapBytes);
+        valueSampleBytes = (valueSampleBytes / 2) * 2;
+        if (valueSampleBytes >= 2) {
+            sample.rawBytes += static_cast<double>(valueSampleBytes);
+            sample.compressedBytes += estimateGearDeltaCompressedBytes(valuePtr, valueSampleBytes);
+        }
+    }
+    return sample;
 }
 
 ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
@@ -1086,9 +1116,16 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
 
     if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
-        auto estimateLosslessRatio = [&](int tokenBudget) -> float {
+        struct LosslessRuntimeStats {
+            float ratio = 1.0f;
+            uint64_t rawBytes = 0;
+            uint64_t compressedBytes = 0;
+            uint64_t decompressedBytes = 0;
+        };
+        auto estimateLosslessRuntimeStats = [&](int tokenBudget) -> LosslessRuntimeStats {
+            LosslessRuntimeStats stats;
             if (mMeta->h2o_lossless_codec != 1 || mBytes != 2 || tokenBudget <= 0 || kvSeqLen <= 0) {
-                return 1.0f;
+                return stats;
             }
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
@@ -1096,28 +1133,27 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
             const size_t sampleCap = 128 * 1024;
 
-            double rawBytes = 0.0;
-            double compressedBytes = 0.0;
+            double rawSampleBytes = 0.0;
+            double compressedSampleBytes = 0.0;
+            double rawFullBytes = 0.0;
             for (int h = 0; h < mKvNumHead; ++h) {
                 const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
                 const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
-                size_t keySampleBytes = ALIMIN(keyBytesPerHead, sampleCap);
-                size_t valueSampleBytes = ALIMIN(valueBytesPerHead, sampleCap);
-                keySampleBytes = (keySampleBytes / 2) * 2;
-                valueSampleBytes = (valueSampleBytes / 2) * 2;
-                if (keySampleBytes >= 2) {
-                    rawBytes += keySampleBytes;
-                    compressedBytes += estimateGearDeltaCompressedBytes(keyPtr, keySampleBytes);
-                }
-                if (valueSampleBytes >= 2) {
-                    rawBytes += valueSampleBytes;
-                    compressedBytes += estimateGearDeltaCompressedBytes(valuePtr, valueSampleBytes);
-                }
+                const auto sample = estimateGearDeltaLosslessStats(keyPtr, keyBytesPerHead, valuePtr, valueBytesPerHead, sampleCap);
+                rawSampleBytes += sample.rawBytes;
+                compressedSampleBytes += sample.compressedBytes;
+                rawFullBytes += static_cast<double>(keyBytesPerHead + valueBytesPerHead);
             }
-            if (rawBytes <= 0.0 || compressedBytes <= 0.0) {
-                return 1.0f;
+            if (rawSampleBytes <= 0.0 || compressedSampleBytes <= 0.0 || rawFullBytes <= 0.0) {
+                return stats;
             }
-            return (float)ALIMAX(1.0, rawBytes / compressedBytes);
+            const double ratio = ALIMAX(1.0, rawSampleBytes / compressedSampleBytes);
+            const double compressedFullBytes = rawFullBytes / ratio;
+            stats.ratio = static_cast<float>(ratio);
+            stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(rawFullBytes)));
+            stats.compressedBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(compressedFullBytes)));
+            stats.decompressedBytes = stats.rawBytes;
+            return stats;
         };
 
         bool applyLossless = false;
@@ -1138,17 +1174,37 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 && (mH2OState->globalStep - mH2OState->globalLastLosslessStep >= updateInterval);
             if (shouldUpdateLossless || mH2OState->globalLastLosslessRatio <= 1.0f) {
                 auto c0 = std::chrono::high_resolution_clock::now();
-                mH2OState->globalLastLosslessRatio = estimateLosslessRatio(losslessTokenBudget);
+                const auto stats = estimateLosslessRuntimeStats(losslessTokenBudget);
                 auto c1 = std::chrono::high_resolution_clock::now();
+                mH2OState->globalLastLosslessRatio = stats.ratio;
                 mH2OState->globalLastLosslessCodecUs =
                     (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(c1 - c0).count();
+                mH2OState->globalLastLosslessRawBytes = stats.rawBytes;
+                mH2OState->globalLastLosslessCompressedBytes = stats.compressedBytes;
+                mH2OState->globalLastLosslessDecompressedBytes = stats.decompressedBytes;
+                mH2OState->globalLastLosslessCompressUs = mH2OState->globalLastLosslessCodecUs;
+                mH2OState->globalLastLosslessDecompressUs = 0;
                 mH2OState->globalLastLosslessStep = mH2OState->globalStep;
             }
             mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
             mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
+            mMeta->h2o_lossless_raw_bytes = mH2OState->globalLastLosslessRawBytes;
+            mMeta->h2o_lossless_compressed_bytes = mH2OState->globalLastLosslessCompressedBytes;
+            mMeta->h2o_lossless_decompressed_bytes = mH2OState->globalLastLosslessDecompressedBytes;
+            mMeta->h2o_lossless_compress_us = mH2OState->globalLastLosslessCompressUs;
+            mMeta->h2o_lossless_decompress_us = mH2OState->globalLastLosslessDecompressUs;
+            mMeta->h2o_lossless_queue_depth_peak = mH2OState->globalLosslessQueueDepthPeak;
+            mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
         } else {
             mMeta->h2o_lossless_ratio = 1.0f;
             mMeta->h2o_codec_us = 0;
+            mMeta->h2o_lossless_raw_bytes = 0;
+            mMeta->h2o_lossless_compressed_bytes = 0;
+            mMeta->h2o_lossless_decompressed_bytes = 0;
+            mMeta->h2o_lossless_compress_us = 0;
+            mMeta->h2o_lossless_decompress_us = 0;
+            mMeta->h2o_lossless_queue_depth_peak = 0;
+            mMeta->h2o_lossless_fallback_count = 0;
         }
     }
 

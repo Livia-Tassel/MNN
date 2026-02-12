@@ -501,6 +501,39 @@ public:
     std::string kv_lossless_codec() const {
         return config_.value("kv_lossless_codec", "none");
     }
+    bool kv_lossless_runtime_enable() const {
+        return config_.value("kv_lossless_runtime_enable", false);
+    }
+    int kv_lossless_block_tokens() const {
+        return config_.value("kv_lossless_block_tokens", 128);
+    }
+    int kv_lossless_hot_recent_tokens() const {
+        return config_.value("kv_lossless_hot_recent_tokens", 256);
+    }
+    int kv_lossless_hot_sink_tokens() const {
+        return config_.value("kv_lossless_hot_sink_tokens", 16);
+    }
+    std::string kv_lossless_codec_runtime() const {
+        return config_.value("kv_lossless_codec_runtime", "fp16_gear_predictive_v3");
+    }
+    std::string kv_lossless_predictors_k() const {
+        return config_.value("kv_lossless_predictors_k", "raw,delta_seq,xor_seq,pair_delta");
+    }
+    std::string kv_lossless_predictors_v() const {
+        return config_.value("kv_lossless_predictors_v", "raw,delta_seq,xor_seq");
+    }
+    int kv_lossless_async_threads() const {
+        return config_.value("kv_lossless_async_threads", 1);
+    }
+    int kv_lossless_max_queue() const {
+        return config_.value("kv_lossless_max_queue", 256);
+    }
+    int kv_lossless_decode_cache_blocks() const {
+        return config_.value("kv_lossless_decode_cache_blocks", 64);
+    }
+    bool kv_lossless_strict_roundtrip_check() const {
+        return config_.value("kv_lossless_strict_roundtrip_check", false);
+    }
     std::string tmp_path() const {
         return config_.value("tmp_path", "");
     }

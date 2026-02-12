@@ -101,6 +101,13 @@ struct LlmContext {
     float h2o_block_quantized_keep = 1.0f;
     int64_t h2o_evict_us = 0;
     int64_t h2o_codec_us = 0;
+    uint64_t h2o_lossless_raw_bytes = 0;
+    uint64_t h2o_lossless_compressed_bytes = 0;
+    uint64_t h2o_lossless_decompressed_bytes = 0;
+    int64_t h2o_lossless_compress_us = 0;
+    int64_t h2o_lossless_decompress_us = 0;
+    int64_t h2o_lossless_queue_depth_peak = 0;
+    int64_t h2o_lossless_fallback_count = 0;
     int h2o_last_evict_tokens = 0;
     int h2o_total_evict_tokens = 0;
     // llm status

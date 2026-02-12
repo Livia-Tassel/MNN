@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 #include <functional>
+#include <cstdint>
 #include "core/Execution.hpp"
 #include "core/OpCommonUtils.hpp"
 #include "CPUKVCacheManager.hpp"
@@ -41,6 +42,13 @@ private:
         int64_t globalLastLosslessStep = 0;
         float globalLastLosslessRatio = 1.0f;
         int64_t globalLastLosslessCodecUs = 0;
+        uint64_t globalLastLosslessRawBytes = 0;
+        uint64_t globalLastLosslessCompressedBytes = 0;
+        uint64_t globalLastLosslessDecompressedBytes = 0;
+        int64_t globalLastLosslessCompressUs = 0;
+        int64_t globalLastLosslessDecompressUs = 0;
+        int64_t globalLosslessQueueDepthPeak = 0;
+        int64_t globalLosslessFallbackCount = 0;
     };
 
     bool mKVCache        = true;

@@ -94,6 +94,17 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     meta->h2o_lossless_front_n = ALIMAX(0, cfg->kv_lossless_front_n());
     const auto codec = cfg->kv_lossless_codec();
     meta->h2o_lossless_codec = (codec == "gear_delta") ? 1 : 0;
+    meta->h2o_lossless_runtime_enable = cfg->kv_lossless_runtime_enable() ? 1 : 0;
+    meta->h2o_lossless_block_tokens = ALIMAX(1, cfg->kv_lossless_block_tokens());
+    meta->h2o_lossless_hot_recent_tokens = ALIMAX(0, cfg->kv_lossless_hot_recent_tokens());
+    meta->h2o_lossless_hot_sink_tokens = ALIMAX(0, cfg->kv_lossless_hot_sink_tokens());
+    meta->h2o_lossless_codec_runtime = cfg->kv_lossless_codec_runtime();
+    meta->h2o_lossless_predictors_k = cfg->kv_lossless_predictors_k();
+    meta->h2o_lossless_predictors_v = cfg->kv_lossless_predictors_v();
+    meta->h2o_lossless_async_threads = ALIMAX(1, cfg->kv_lossless_async_threads());
+    meta->h2o_lossless_max_queue = ALIMAX(1, cfg->kv_lossless_max_queue());
+    meta->h2o_lossless_decode_cache_blocks = ALIMAX(0, cfg->kv_lossless_decode_cache_blocks());
+    meta->h2o_lossless_strict_roundtrip_check = cfg->kv_lossless_strict_roundtrip_check() ? 1 : 0;
     meta->h2o_in_decode = 0;
 }
 
@@ -594,6 +605,13 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mContext->h2o_block_quantized_keep = mMeta->h2o_block_quantized_keep;
     mContext->h2o_evict_us = mMeta->h2o_evict_us;
     mContext->h2o_codec_us = mMeta->h2o_codec_us;
+    mContext->h2o_lossless_raw_bytes = mMeta->h2o_lossless_raw_bytes;
+    mContext->h2o_lossless_compressed_bytes = mMeta->h2o_lossless_compressed_bytes;
+    mContext->h2o_lossless_decompressed_bytes = mMeta->h2o_lossless_decompressed_bytes;
+    mContext->h2o_lossless_compress_us = mMeta->h2o_lossless_compress_us;
+    mContext->h2o_lossless_decompress_us = mMeta->h2o_lossless_decompress_us;
+    mContext->h2o_lossless_queue_depth_peak = mMeta->h2o_lossless_queue_depth_peak;
+    mContext->h2o_lossless_fallback_count = mMeta->h2o_lossless_fallback_count;
     mContext->h2o_last_evict_tokens = mMeta->h2o_last_evict_tokens;
     mContext->h2o_total_evict_tokens = mMeta->h2o_total_evict_tokens;
     return outputs;
@@ -740,6 +758,13 @@ void Llm::reset() {
     mContext->h2o_block_quantized_keep = 1.0f;
     mContext->h2o_evict_us = 0;
     mContext->h2o_codec_us = 0;
+    mContext->h2o_lossless_raw_bytes = 0;
+    mContext->h2o_lossless_compressed_bytes = 0;
+    mContext->h2o_lossless_decompressed_bytes = 0;
+    mContext->h2o_lossless_compress_us = 0;
+    mContext->h2o_lossless_decompress_us = 0;
+    mContext->h2o_lossless_queue_depth_peak = 0;
+    mContext->h2o_lossless_fallback_count = 0;
     mContext->h2o_last_evict_tokens = 0;
     mContext->h2o_total_evict_tokens = 0;
     mMeta->remove = mMeta->previous;
@@ -755,6 +780,13 @@ void Llm::reset() {
     mMeta->h2o_block_quantized_keep = 1.0f;
     mMeta->h2o_evict_us = 0;
     mMeta->h2o_codec_us = 0;
+    mMeta->h2o_lossless_raw_bytes = 0;
+    mMeta->h2o_lossless_compressed_bytes = 0;
+    mMeta->h2o_lossless_decompressed_bytes = 0;
+    mMeta->h2o_lossless_compress_us = 0;
+    mMeta->h2o_lossless_decompress_us = 0;
+    mMeta->h2o_lossless_queue_depth_peak = 0;
+    mMeta->h2o_lossless_fallback_count = 0;
     mMeta->h2o_last_evict_tokens = 0;
     mMeta->h2o_total_evict_tokens = 0;
 }
@@ -791,6 +823,13 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mMeta->h2o_block_quantized_keep = 1.0f;
         mMeta->h2o_evict_us = 0;
         mMeta->h2o_codec_us = 0;
+        mMeta->h2o_lossless_raw_bytes = 0;
+        mMeta->h2o_lossless_compressed_bytes = 0;
+        mMeta->h2o_lossless_decompressed_bytes = 0;
+        mMeta->h2o_lossless_compress_us = 0;
+        mMeta->h2o_lossless_decompress_us = 0;
+        mMeta->h2o_lossless_queue_depth_peak = 0;
+        mMeta->h2o_lossless_fallback_count = 0;
         mMeta->h2o_last_evict_tokens = 0;
         mMeta->h2o_total_evict_tokens = 0;
     }
