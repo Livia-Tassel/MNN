@@ -201,18 +201,64 @@ static double estimateGearDeltaCompressedBytes(const uint8_t* data, size_t bytes
     return ALIMAX(1.0, compressed);
 }
 
+// Estimate compressed bytes for FP32 stream using per-byte channel modeling.
+// For each byte lane in a float word, pick the better entropy model between
+// raw bytes and delta bytes along sequence.
+static double estimateFp32PredictiveCompressedBytes(const uint8_t* data, size_t bytes) {
+    if (data == nullptr || bytes < 4) {
+        return static_cast<double>(bytes);
+    }
+    const size_t words = bytes / 4;
+    if (words == 0) {
+        return static_cast<double>(bytes);
+    }
+    std::array<uint32_t, 256> rawHist[4];
+    std::array<uint32_t, 256> deltaHist[4];
+    uint8_t prev[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < words; ++i) {
+        const uint8_t* w = data + 4 * i;
+        for (int lane = 0; lane < 4; ++lane) {
+            const uint8_t v = w[lane];
+            rawHist[lane][v] += 1;
+            const uint8_t dv = static_cast<uint8_t>(v - prev[lane]);
+            deltaHist[lane][dv] += 1;
+            prev[lane] = v;
+        }
+    }
+    double totalBits = 0.0;
+    for (int lane = 0; lane < 4; ++lane) {
+        const double rawBits = byteEntropyBits(rawHist[lane], words);
+        const double deltaBits = byteEntropyBits(deltaHist[lane], words);
+        totalBits += ALIMIN(rawBits, deltaBits);
+    }
+    const double overheadBytes = 96.0;
+    const double compressed = totalBits / 8.0 + overheadBytes;
+    return ALIMAX(1.0, compressed);
+}
+
+static double estimateLosslessCompressedBytes(const uint8_t* data, size_t bytes, int bytesPerElem) {
+    if (bytesPerElem == 2) {
+        return estimateGearDeltaCompressedBytes(data, bytes);
+    }
+    if (bytesPerElem == 4) {
+        return estimateFp32PredictiveCompressedBytes(data, bytes);
+    }
+    return static_cast<double>(bytes);
+}
+
 static LosslessStatSample estimateGearDeltaLosslessStats(const uint8_t* keyPtr,
                                                          size_t keyBytes,
                                                          const uint8_t* valuePtr,
                                                          size_t valueBytes,
-                                                         size_t sampleCapBytes) {
+                                                         size_t sampleCapBytes,
+                                                         int bytesPerElem) {
     LosslessStatSample sample;
     if (keyPtr != nullptr && keyBytes >= 2) {
         size_t keySampleBytes = ALIMIN(keyBytes, sampleCapBytes);
         keySampleBytes = (keySampleBytes / 2) * 2;
         if (keySampleBytes >= 2) {
             sample.rawBytes += static_cast<double>(keySampleBytes);
-            sample.compressedBytes += estimateGearDeltaCompressedBytes(keyPtr, keySampleBytes);
+            sample.compressedBytes += estimateLosslessCompressedBytes(keyPtr, keySampleBytes, bytesPerElem);
         }
     }
     if (valuePtr != nullptr && valueBytes >= 2) {
@@ -220,7 +266,7 @@ static LosslessStatSample estimateGearDeltaLosslessStats(const uint8_t* keyPtr,
         valueSampleBytes = (valueSampleBytes / 2) * 2;
         if (valueSampleBytes >= 2) {
             sample.rawBytes += static_cast<double>(valueSampleBytes);
-            sample.compressedBytes += estimateGearDeltaCompressedBytes(valuePtr, valueSampleBytes);
+            sample.compressedBytes += estimateLosslessCompressedBytes(valuePtr, valueSampleBytes, bytesPerElem);
         }
     }
     return sample;
@@ -1124,7 +1170,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         };
         auto estimateLosslessRuntimeStats = [&](int tokenBudget) -> LosslessRuntimeStats {
             LosslessRuntimeStats stats;
-            if (mMeta->h2o_lossless_codec != 1 || mBytes != 2 || tokenBudget <= 0 || kvSeqLen <= 0) {
+            if (mMeta->h2o_lossless_codec != 1 || tokenBudget <= 0 || kvSeqLen <= 0) {
+                return stats;
+            }
+            if (mBytes != 2 && mBytes != 4) {
                 return stats;
             }
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
@@ -1139,7 +1188,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             for (int h = 0; h < mKvNumHead; ++h) {
                 const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
                 const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
-                const auto sample = estimateGearDeltaLosslessStats(keyPtr, keyBytesPerHead, valuePtr, valueBytesPerHead, sampleCap);
+                const auto sample = estimateGearDeltaLosslessStats(
+                    keyPtr,
+                    keyBytesPerHead,
+                    valuePtr,
+                    valueBytesPerHead,
+                    sampleCap,
+                    mBytes
+                );
                 rawSampleBytes += sample.rawBytes;
                 compressedSampleBytes += sample.compressedBytes;
                 rawFullBytes += static_cast<double>(keyBytesPerHead + valueBytesPerHead);
