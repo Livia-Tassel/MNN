@@ -9,7 +9,6 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -151,123 +150,187 @@ static inline int clampInt(int value, int low, int high) {
 }
 
 struct LosslessStatSample {
-    double rawBytes = 0.0;
-    double compressedBytes = 0.0;
+    uint64_t rawBytes = 0;
+    uint64_t compressedBytes = 0;
 };
 
-static double byteEntropyBits(const std::array<uint32_t, 256>& hist, size_t total) {
-    if (total == 0) {
-        return 0.0;
+struct PredictorFlags {
+    bool raw = true;
+    bool deltaSeq = false;
+    bool xorSeq = false;
+};
+
+static PredictorFlags parsePredictorFlags(const std::string& spec, bool defaultRaw) {
+    PredictorFlags flags;
+    flags.raw = defaultRaw;
+    if (spec.empty()) {
+        return flags;
     }
-    const double invTotal = 1.0 / static_cast<double>(total);
-    double bits = 0.0;
-    for (int i = 0; i < 256; ++i) {
-        const auto c = hist[i];
-        if (c == 0) {
+    flags.raw = false;
+    size_t begin = 0;
+    while (begin < spec.size()) {
+        size_t end = spec.find(',', begin);
+        if (end == std::string::npos) {
+            end = spec.size();
+        }
+        size_t l = begin;
+        while (l < end && (spec[l] == ' ' || spec[l] == '\t')) {
+            ++l;
+        }
+        size_t r = end;
+        while (r > l && (spec[r - 1] == ' ' || spec[r - 1] == '\t')) {
+            --r;
+        }
+        const auto token = spec.substr(l, r - l);
+        if (token == "raw") {
+            flags.raw = true;
+        } else if (token == "delta_seq") {
+            flags.deltaSeq = true;
+        } else if (token == "xor_seq") {
+            flags.xorSeq = true;
+        }
+        begin = end + 1;
+    }
+    if (!flags.raw && !flags.deltaSeq && !flags.xorSeq) {
+        flags.raw = true;
+    }
+    return flags;
+}
+
+static void buildDeltaSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+    dst.resize(src.size());
+    uint8_t prev = 0;
+    for (size_t i = 0; i < src.size(); ++i) {
+        const uint8_t cur = src[i];
+        dst[i] = static_cast<uint8_t>(cur - prev);
+        prev = cur;
+    }
+}
+
+static void buildXorSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+    dst.resize(src.size());
+    uint8_t prev = 0;
+    for (size_t i = 0; i < src.size(); ++i) {
+        const uint8_t cur = src[i];
+        dst[i] = static_cast<uint8_t>(cur ^ prev);
+        prev = cur;
+    }
+}
+
+static inline size_t repeatRunLen(const uint8_t* data, size_t n, size_t pos) {
+    if (pos >= n) {
+        return 0;
+    }
+    size_t run = 1;
+    while (pos + run < n && data[pos + run] == data[pos] && run < 131) {
+        ++run;
+    }
+    return run;
+}
+
+// RLE stream format:
+// - Literal run: 1-byte ctrl [0..127] means len=ctrl+1, followed by literal bytes.
+// - Repeat  run: 1-byte ctrl [128..255] means len=(ctrl&127)+4, followed by repeated byte.
+static size_t rleEncodedSize(const uint8_t* data, size_t n) {
+    if (data == nullptr || n == 0) {
+        return 0;
+    }
+    size_t outBytes = 0;
+    size_t i = 0;
+    while (i < n) {
+        size_t run = repeatRunLen(data, n, i);
+        if (run >= 4) {
+            outBytes += 2;
+            i += run;
             continue;
         }
-        const double p = static_cast<double>(c) * invTotal;
-        bits += -static_cast<double>(c) * std::log2(p);
+        const size_t litBegin = i;
+        size_t litLen = 0;
+        while (i < n && litLen < 128) {
+            run = repeatRunLen(data, n, i);
+            if (run >= 4) {
+                break;
+            }
+            ++i;
+            ++litLen;
+        }
+        MNN_ASSERT(litLen > 0);
+        outBytes += 1 + (i - litBegin);
     }
-    return bits;
+    return outBytes;
 }
 
-// Estimate compressed bytes for FP16 stream with "gear_delta" style modeling:
-// low-byte stream + delta(high-byte stream), both entropy-coded.
-static double estimateGearDeltaCompressedBytes(const uint8_t* data, size_t bytes) {
+// Encode one byte stream with predictor search and RLE payload.
+// Frame bytes:
+// - mode: 1 byte (0 raw, 1 delta_seq, 2 xor_seq)
+// - original length: 4 bytes (LE)
+// - payload: RLE bytes
+static size_t predictiveRLEEncodedSize(const std::vector<uint8_t>& src,
+                                       const PredictorFlags& flags,
+                                       std::vector<uint8_t>& temp) {
+    if (src.empty()) {
+        return 5;
+    }
+    size_t bestPayload = std::numeric_limits<size_t>::max();
+    if (flags.raw) {
+        bestPayload = ALIMIN(bestPayload, rleEncodedSize(src.data(), src.size()));
+    }
+    if (flags.deltaSeq) {
+        buildDeltaSeq(src, temp);
+        bestPayload = ALIMIN(bestPayload, rleEncodedSize(temp.data(), temp.size()));
+    }
+    if (flags.xorSeq) {
+        buildXorSeq(src, temp);
+        bestPayload = ALIMIN(bestPayload, rleEncodedSize(temp.data(), temp.size()));
+    }
+    if (bestPayload == std::numeric_limits<size_t>::max()) {
+        bestPayload = rleEncodedSize(src.data(), src.size());
+    }
+    return 1 + 4 + bestPayload;
+}
+
+// Runtime bitstream size for fp16 gear-split + predictor + RLE.
+static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
+                                            size_t bytes,
+                                            const PredictorFlags& loFlags,
+                                            const PredictorFlags& hiFlags) {
     if (data == nullptr || bytes < 2) {
-        return static_cast<double>(bytes);
+        return bytes;
     }
     const size_t words = bytes / 2;
-    if (words == 0) {
-        return static_cast<double>(bytes);
-    }
-    std::array<uint32_t, 256> loHist{};
-    std::array<uint32_t, 256> hiDeltaHist{};
-    uint8_t prevHi = 0;
+    std::vector<uint8_t> lo(words);
+    std::vector<uint8_t> hi(words);
     for (size_t i = 0; i < words; ++i) {
-        const uint8_t lo = data[2 * i + 0];
-        const uint8_t hi = data[2 * i + 1];
-        loHist[lo] += 1;
-        const uint8_t deltaHi = static_cast<uint8_t>(hi - prevHi);
-        hiDeltaHist[deltaHi] += 1;
-        prevHi = hi;
+        lo[i] = data[2 * i + 0];
+        hi[i] = data[2 * i + 1];
     }
-    const double loBits = byteEntropyBits(loHist, words);
-    const double hiBits = byteEntropyBits(hiDeltaHist, words);
-    // Add a small per-stream overhead to avoid over-optimistic tiny samples.
-    const double overheadBytes = 64.0;
-    const double compressed = (loBits + hiBits) / 8.0 + overheadBytes;
-    return ALIMAX(1.0, compressed);
+    std::vector<uint8_t> temp;
+    // Tensor frame:
+    // - word_count: 4 bytes
+    // - lo stream frame
+    // - hi stream frame
+    size_t encoded = 4;
+    encoded += predictiveRLEEncodedSize(lo, loFlags, temp);
+    encoded += predictiveRLEEncodedSize(hi, hiFlags, temp);
+    return encoded;
 }
 
-// Estimate compressed bytes for FP32 stream using per-byte channel modeling.
-// For each byte lane in a float word, pick the better entropy model between
-// raw bytes and delta bytes along sequence.
-static double estimateFp32PredictiveCompressedBytes(const uint8_t* data, size_t bytes) {
-    if (data == nullptr || bytes < 4) {
-        return static_cast<double>(bytes);
-    }
-    const size_t words = bytes / 4;
-    if (words == 0) {
-        return static_cast<double>(bytes);
-    }
-    std::array<uint32_t, 256> rawHist[4];
-    std::array<uint32_t, 256> deltaHist[4];
-    uint8_t prev[4] = {0, 0, 0, 0};
-    for (size_t i = 0; i < words; ++i) {
-        const uint8_t* w = data + 4 * i;
-        for (int lane = 0; lane < 4; ++lane) {
-            const uint8_t v = w[lane];
-            rawHist[lane][v] += 1;
-            const uint8_t dv = static_cast<uint8_t>(v - prev[lane]);
-            deltaHist[lane][dv] += 1;
-            prev[lane] = v;
-        }
-    }
-    double totalBits = 0.0;
-    for (int lane = 0; lane < 4; ++lane) {
-        const double rawBits = byteEntropyBits(rawHist[lane], words);
-        const double deltaBits = byteEntropyBits(deltaHist[lane], words);
-        totalBits += ALIMIN(rawBits, deltaBits);
-    }
-    const double overheadBytes = 96.0;
-    const double compressed = totalBits / 8.0 + overheadBytes;
-    return ALIMAX(1.0, compressed);
-}
-
-static double estimateLosslessCompressedBytes(const uint8_t* data, size_t bytes, int bytesPerElem) {
-    if (bytesPerElem == 2) {
-        return estimateGearDeltaCompressedBytes(data, bytes);
-    }
-    if (bytesPerElem == 4) {
-        return estimateFp32PredictiveCompressedBytes(data, bytes);
-    }
-    return static_cast<double>(bytes);
-}
-
-static LosslessStatSample estimateGearDeltaLosslessStats(const uint8_t* keyPtr,
-                                                         size_t keyBytes,
-                                                         const uint8_t* valuePtr,
-                                                         size_t valueBytes,
-                                                         size_t sampleCapBytes,
-                                                         int bytesPerElem) {
+static LosslessStatSample encodeGearDeltaLosslessStats(const uint8_t* keyPtr,
+                                                       size_t keyBytes,
+                                                       const uint8_t* valuePtr,
+                                                       size_t valueBytes,
+                                                       const PredictorFlags& keyFlags,
+                                                       const PredictorFlags& valueFlags) {
     LosslessStatSample sample;
     if (keyPtr != nullptr && keyBytes >= 2) {
-        size_t keySampleBytes = ALIMIN(keyBytes, sampleCapBytes);
-        keySampleBytes = (keySampleBytes / 2) * 2;
-        if (keySampleBytes >= 2) {
-            sample.rawBytes += static_cast<double>(keySampleBytes);
-            sample.compressedBytes += estimateLosslessCompressedBytes(keyPtr, keySampleBytes, bytesPerElem);
-        }
+        const size_t keyAlignedBytes = (keyBytes / 2) * 2;
+        sample.rawBytes += keyAlignedBytes;
+        sample.compressedBytes += fp16GearPredictiveEncodedSize(keyPtr, keyAlignedBytes, keyFlags, keyFlags);
     }
     if (valuePtr != nullptr && valueBytes >= 2) {
-        size_t valueSampleBytes = ALIMIN(valueBytes, sampleCapBytes);
-        valueSampleBytes = (valueSampleBytes / 2) * 2;
-        if (valueSampleBytes >= 2) {
-            sample.rawBytes += static_cast<double>(valueSampleBytes);
-            sample.compressedBytes += estimateLosslessCompressedBytes(valuePtr, valueSampleBytes, bytesPerElem);
-        }
+        const size_t valueAlignedBytes = (valueBytes / 2) * 2;
+        sample.rawBytes += valueAlignedBytes;
+        sample.compressedBytes += fp16GearPredictiveEncodedSize(valuePtr, valueAlignedBytes, valueFlags, valueFlags);
     }
     return sample;
 }
@@ -1186,7 +1249,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         };
         auto estimateLosslessRuntimeStats = [&](int tokenBudget) -> LosslessRuntimeStats {
             LosslessRuntimeStats stats;
-            if (mMeta->h2o_lossless_codec != 1 || tokenBudget <= 0 || kvSeqLen <= 0) {
+            if (mMeta->h2o_lossless_codec != 1
+                || mMeta->h2o_lossless_runtime_enable == 0
+                || tokenBudget <= 0
+                || kvSeqLen <= 0) {
                 return stats;
             }
             if (mBytes != 2 && mBytes != 4) {
@@ -1196,8 +1262,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
             const double logicalRawBytes = (double)evalTokens * (double)mKvNumHead * (double)mHeadDim * (double)mBytes * 2.0;
             if (mBytes == 4) {
-                // Runtime v3 lossless codec is not online-enabled for fp32 path yet.
-                // Keep byte stats meaningful but conservative to avoid over-optimistic proxy values.
+                // Runtime v3 lossless codec is currently fp16-only.
                 stats.ratio = 1.0f;
                 stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
                 stats.compressedBytes = stats.rawBytes;
@@ -1205,45 +1270,53 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 stats.fallbackUsed = true;
                 return stats;
             }
+            const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
+            const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
             const size_t keyBytesPerHead = (size_t)UP_DIV(evalTokens, hP) * (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP * (size_t)mBytes;
             const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
-            const size_t sampleCap = 128 * 1024;
-
-            double rawSampleBytes = 0.0;
-            double compressedSampleBytes = 0.0;
-            double rawFullBytes = 0.0;
+            uint64_t rawFullBytes = 0;
+            uint64_t compressedFullBytes = 0;
             for (int h = 0; h < mKvNumHead; ++h) {
                 const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
                 const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
-                const auto sample = estimateGearDeltaLosslessStats(
+                const auto sample = encodeGearDeltaLosslessStats(
                     keyPtr,
                     keyBytesPerHead,
                     valuePtr,
                     valueBytesPerHead,
-                    sampleCap,
-                    mBytes
+                    keyFlags,
+                    valueFlags
                 );
-                rawSampleBytes += sample.rawBytes;
-                compressedSampleBytes += sample.compressedBytes;
-                rawFullBytes += static_cast<double>(keyBytesPerHead + valueBytesPerHead);
+                rawFullBytes += sample.rawBytes;
+                compressedFullBytes += sample.compressedBytes;
             }
-            if (rawSampleBytes <= 0.0 || compressedSampleBytes <= 0.0 || rawFullBytes <= 0.0) {
+            if (rawFullBytes == 0 || compressedFullBytes == 0) {
                 stats.fallbackUsed = true;
+                stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
+                stats.compressedBytes = stats.rawBytes;
+                stats.decompressedBytes = stats.rawBytes;
                 return stats;
             }
-            const double ratio = ALIMAX(1.0, rawSampleBytes / compressedSampleBytes);
-            const double compressedFullBytes = rawFullBytes / ratio;
-            stats.ratio = static_cast<float>(ratio);
-            stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(rawFullBytes)));
-            stats.compressedBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(compressedFullBytes)));
-            stats.decompressedBytes = stats.rawBytes;
+            // If compression expands, count as runtime fallback and keep RAW.
+            if (compressedFullBytes > rawFullBytes) {
+                compressedFullBytes = rawFullBytes;
+                stats.fallbackUsed = true;
+            }
+            stats.rawBytes = rawFullBytes;
+            stats.compressedBytes = compressedFullBytes;
+            stats.decompressedBytes = rawFullBytes;
+            stats.ratio = compressedFullBytes > 0
+                ? static_cast<float>((double)rawFullBytes / (double)compressedFullBytes)
+                : 1.0f;
             return stats;
         };
 
         bool applyLossless = false;
         int losslessTokenBudget = kvSeqLen;
-        if (mMeta->h2o_lossless_enable != 0 && mMeta->h2o_lossless_codec == 1) {
+        if (mMeta->h2o_lossless_enable != 0
+            && mMeta->h2o_lossless_codec == 1
+            && mMeta->h2o_lossless_runtime_enable != 0) {
             if (mMeta->h2o_lossless_scope == 1) { // front_n
                 applyLossless = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
                 losslessTokenBudget = kvSeqLen;
