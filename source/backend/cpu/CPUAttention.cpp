@@ -153,11 +153,6 @@ static inline int clampInt(int value, int low, int high) {
     return ALIMAX(low, ALIMIN(high, value));
 }
 
-struct LosslessStatSample {
-    uint64_t rawBytes = 0;
-    uint64_t compressedBytes = 0;
-};
-
 struct PredictorFlags {
     bool raw = true;
     bool deltaSeq = false;
@@ -391,26 +386,6 @@ static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
     encoded += predictiveRLEEncodedSize(lo, loFlags, temp);
     encoded += predictiveRLEEncodedSize(hi, hiFlags, temp);
     return encoded;
-}
-
-static LosslessStatSample encodeGearDeltaLosslessStats(const uint8_t* keyPtr,
-                                                       size_t keyBytes,
-                                                       const uint8_t* valuePtr,
-                                                       size_t valueBytes,
-                                                       const PredictorFlags& keyFlags,
-                                                       const PredictorFlags& valueFlags) {
-    LosslessStatSample sample;
-    if (keyPtr != nullptr && keyBytes >= 2) {
-        const size_t keyAlignedBytes = (keyBytes / 2) * 2;
-        sample.rawBytes += keyAlignedBytes;
-        sample.compressedBytes += fp16GearPredictiveEncodedSize(keyPtr, keyAlignedBytes, keyFlags, keyFlags);
-    }
-    if (valuePtr != nullptr && valueBytes >= 2) {
-        const size_t valueAlignedBytes = (valueBytes / 2) * 2;
-        sample.rawBytes += valueAlignedBytes;
-        sample.compressedBytes += fp16GearPredictiveEncodedSize(valuePtr, valueAlignedBytes, valueFlags, valueFlags);
-    }
-    return sample;
 }
 
 ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
@@ -1351,22 +1326,45 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
             const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
-            const size_t keyBytesPerHead = (size_t)UP_DIV(evalTokens, hP) * (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP * (size_t)mBytes;
-            const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
+            const size_t logicalBytesPerHead = (size_t)evalTokens * (size_t)mHeadDim * (size_t)mBytes;
             std::vector<uint8_t> keyMerged;
             std::vector<uint8_t> valueMerged;
-            keyMerged.reserve((size_t)mKvNumHead * keyBytesPerHead);
-            valueMerged.reserve((size_t)mKvNumHead * valueBytesPerHead);
+            keyMerged.reserve((size_t)mKvNumHead * logicalBytesPerHead);
+            valueMerged.reserve((size_t)mKvNumHead * logicalBytesPerHead);
+            const size_t keyStride0 = (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP;
+            const size_t keyStride1 = (size_t)hP * (size_t)lP;
+            const size_t valueStride2 = (size_t)lP * (size_t)hP;
+            const size_t valueStride1 = (size_t)UP_DIV(flashBlockKv, lP) * valueStride2;
+            const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(mHeadDim, hP);
             for (int h = 0; h < mKvNumHead; ++h) {
                 const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
                 const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
-                if (keyPtr != nullptr && keyBytesPerHead >= 2) {
-                    const size_t keyAlignedBytes = (keyBytesPerHead / 2) * 2;
-                    keyMerged.insert(keyMerged.end(), keyPtr, keyPtr + keyAlignedBytes);
+                if (keyPtr == nullptr || valuePtr == nullptr) {
+                    continue;
                 }
-                if (valuePtr != nullptr && valueBytesPerHead >= 2) {
-                    const size_t valueAlignedBytes = (valueBytesPerHead / 2) * 2;
-                    valueMerged.insert(valueMerged.end(), valuePtr, valuePtr + valueAlignedBytes);
+                for (int seq = 0; seq < evalTokens; ++seq) {
+                    const int seqOut = seq / hP;
+                    const int seqIn = seq % hP;
+                    const size_t keySeqBase = (size_t)seqOut * keyStride0 + (size_t)seqIn * (size_t)lP;
+                    const int seqInFlash = seq % flashBlockKv;
+                    const size_t valueInner = (size_t)(seq / flashBlockKv) * valueStride0
+                        + (size_t)(seqInFlash / lP) * valueStride2
+                        + (size_t)(seqInFlash % lP);
+                    for (int dim = 0; dim < mHeadDim; ++dim) {
+                        const size_t keyIndex = keySeqBase
+                            + (size_t)(dim / lP) * keyStride1
+                            + (size_t)(dim % lP);
+                        const uint8_t* keyElem = keyPtr + keyIndex * (size_t)mBytes;
+                        keyMerged.push_back(keyElem[0]);
+                        keyMerged.push_back(keyElem[1]);
+
+                        const size_t valueIndex = (size_t)(dim / hP) * valueStride1
+                            + (size_t)(dim % hP) * (size_t)lP
+                            + valueInner;
+                        const uint8_t* valueElem = valuePtr + valueIndex * (size_t)mBytes;
+                        valueMerged.push_back(valueElem[0]);
+                        valueMerged.push_back(valueElem[1]);
+                    }
                 }
             }
             const uint64_t rawFullBytes = (uint64_t)keyMerged.size() + (uint64_t)valueMerged.size();
