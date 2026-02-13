@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <limits>
 #if !defined(_WIN32)
 #include <dlfcn.h>
@@ -1718,7 +1719,23 @@ CPUAttention::CPUAttention(Backend *backend, bool kv_cache) : Execution(backend)
     kvconfig.mExpandChunk = 64;
     kvconfig.mBlockNum = 1;
     mKVCacheManager.reset(new CPUKVCacheManager(backend, kvconfig));
-    mH2OState.reset(new H2OSharedState);
+    {
+        // Share one H2O runtime state across all attention layers that bind to the same KVMeta.
+        // Otherwise each layer keeps isolated cursors/statistics and the final meta can be overwritten
+        // by a layer-local default state (showing 1.0/0.0 in bench summary).
+        static std::mutex sH2OStateLock;
+        static std::unordered_map<const void*, std::weak_ptr<H2OSharedState>> sH2OStateByMeta;
+        const void* key = static_cast<const void*>(mMeta);
+        std::lock_guard<std::mutex> guard(sH2OStateLock);
+        auto it = sH2OStateByMeta.find(key);
+        if (it != sH2OStateByMeta.end()) {
+            mH2OState = it->second.lock();
+        }
+        if (!mH2OState) {
+            mH2OState.reset(new H2OSharedState);
+            sH2OStateByMeta[key] = mH2OState;
+        }
+    }
 }
 
 CPUAttention::~CPUAttention() {
