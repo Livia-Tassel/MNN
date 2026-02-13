@@ -1543,12 +1543,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);
 
             int evalTokenCount = 0;
-            if (kvSeqLen >= triggerMin && intervalReady) {
+            if (kvSeqLen >= triggerMin) {
                 if (layerState.losslessUpdateCount <= 0) {
+                    // Bootstrap once as soon as budget is large enough.
                     if (tokenBudgetGrowth >= blockStep) {
                         evalTokenCount = tokenBudgetGrowth;
                     }
-                } else if (tokenBudgetGrowth >= groupedStep) {
+                } else if (intervalReady && tokenBudgetGrowth >= groupedStep) {
                     evalTokenCount = groupedStep;
                 }
             }
