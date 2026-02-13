@@ -1572,6 +1572,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessCodecUs = stats.compressUs;
                 mH2OState->globalLastLosslessStep = losslessStep;
                 mH2OState->globalLastLosslessTokenBudget = layerState.losslessLastTokenBudget;
+                // Keep latest non-zero sample as fallback in case later scope aggregation is empty.
+                mH2OState->globalLastLosslessRawBytes = layerState.losslessRawBytes;
+                mH2OState->globalLastLosslessCompressedBytes = layerState.losslessCompressedBytes;
+                mH2OState->globalLastLosslessDecompressedBytes = layerState.losslessDecompressedBytes;
+                mH2OState->globalLastLosslessCompressUs = layerState.losslessCompressUs;
+                mH2OState->globalLastLosslessDecompressUs = layerState.losslessDecompressUs;
+                mH2OState->globalLosslessFallbackCount = layerState.losslessFallbackCount;
+                if (layerState.losslessCompressedBytes > 0 && layerState.losslessRawBytes > 0) {
+                    mH2OState->globalLastLosslessRatio =
+                        (float)((double)layerState.losslessRawBytes / (double)layerState.losslessCompressedBytes);
+                }
 
                 if (mMeta->h2o_log_stats != 0) {
                     const bool zstdReady = getZstdApi().available;
@@ -1648,17 +1659,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
         }
 
-        mH2OState->globalLastLosslessRawBytes = totalRawBytes;
-        mH2OState->globalLastLosslessCompressedBytes = totalCompressedBytes;
-        mH2OState->globalLastLosslessDecompressedBytes = totalDecompressedBytes;
-        mH2OState->globalLastLosslessCompressUs = totalCompressUs;
-        mH2OState->globalLastLosslessDecompressUs = totalDecompressUs;
-        mH2OState->globalLosslessFallbackCount = totalFallbackCount;
+        if (totalRawBytes > 0 && totalCompressedBytes > 0) {
+            mH2OState->globalLastLosslessRawBytes = totalRawBytes;
+            mH2OState->globalLastLosslessCompressedBytes = totalCompressedBytes;
+            mH2OState->globalLastLosslessDecompressedBytes = totalDecompressedBytes;
+            mH2OState->globalLastLosslessCompressUs = totalCompressUs;
+            mH2OState->globalLastLosslessDecompressUs = totalDecompressUs;
+            mH2OState->globalLosslessFallbackCount = totalFallbackCount;
+        }
         if (totalCompressedBytes > 0 && totalRawBytes > 0) {
             mH2OState->globalLastLosslessRatio =
                 (float)((double)totalRawBytes / (double)totalCompressedBytes);
-        } else {
-            mH2OState->globalLastLosslessRatio = 1.0f;
         }
 
         // Always expose global lossless stats for current request.
