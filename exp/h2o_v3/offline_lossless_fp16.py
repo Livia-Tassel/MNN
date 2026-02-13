@@ -731,8 +731,6 @@ def main():
             seq_len = int(entry["seq_len"])
             heads = int(entry["kv_heads"])
             head_dim = int(entry["head_dim"])
-            k_raw_bytes += len(entry["k_fp16"])
-            v_raw_bytes += len(entry["v_fp16"])
             try:
                 k_comp, k_diag = compress_single_entry_fp16(
                     entry["k_fp16"], seq_len, heads, head_dim, args, compressor, tensor_name="k"
@@ -744,6 +742,8 @@ def main():
                 skip("compression_failed")
                 continue
 
+            k_raw_bytes += len(entry["k_fp16"])
+            v_raw_bytes += len(entry["v_fp16"])
             k_compressed_bytes += k_comp
             v_compressed_bytes += v_comp
             k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
@@ -761,8 +761,6 @@ def main():
 
         for _, entries in groups.items():
             entries.sort(key=lambda x: (int(x["seq_start"]), int(x["order_idx"])))
-            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
-            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
             try:
                 k_comp, k_diag = compress_grouped_entries_fp16(entries, args, compressor, tensor_name="k")
                 v_comp, v_diag = compress_grouped_entries_fp16(entries, args, compressor, tensor_name="v")
@@ -770,6 +768,8 @@ def main():
                 skip("compression_failed")
                 continue
 
+            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
+            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
             k_compressed_bytes += k_comp
             v_compressed_bytes += v_comp
             k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
@@ -783,8 +783,6 @@ def main():
             seq_len = int(entry["seq_len"])
             heads = int(entry["kv_heads"])
             head_dim = int(entry["head_dim"])
-            k_raw_bytes += len(entry["k_fp16"])
-            v_raw_bytes += len(entry["v_fp16"])
             try:
                 k_comp, k_diag = compress_single_entry_chunked_fp16(
                     entry["k_fp16"], seq_len, heads, head_dim, args, compressor, tensor_name="k"
@@ -795,6 +793,8 @@ def main():
             except Exception:
                 skip("compression_failed")
                 continue
+            k_raw_bytes += len(entry["k_fp16"])
+            v_raw_bytes += len(entry["v_fp16"])
             k_compressed_bytes += k_comp
             v_compressed_bytes += v_comp
             k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))

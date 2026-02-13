@@ -46,6 +46,15 @@ def main():
     if args.log_files:
         files.extend(Path(x.strip()) for x in args.log_files.split(",") if x.strip())
     files = [f for f in files if f.exists()]
+    # Deduplicate: --log-dir and --log-files may reference the same file.
+    seen = set()
+    deduped = []
+    for f in files:
+        key = f.resolve()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(f)
+    files = deduped
     if not files:
         raise SystemExit("No log files found.")
 

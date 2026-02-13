@@ -121,9 +121,13 @@ def main():
     elif upper_lossless > 0.0:
         selected_lossless = upper_lossless
         selected_source = "offline_upper_bound"
+        print("[WARN] online-sim lossless JSON not provided or invalid; "
+              "falling back to upper-bound. Gate result may be unreliable.")
     else:
         selected_lossless = avg_runtime_lossless
         selected_source = "runtime"
+        print("[WARN] no offline lossless JSON provided; "
+              "falling back to runtime value. Gate result may be unreliable.")
 
     for row in rows:
         row["_total_selected"] = row["_h2o_lossy"] * selected_lossless

@@ -1523,23 +1523,22 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         if (applyLossless && layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
             auto& layerState = mH2OState->layerStates[layerIndex];
             if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
+                // Budget shrank (H2O eviction compacted this layer's KV cache).
+                // Reset the token-budget watermark so delta tracking works going
+                // forward, but preserve the accumulated byte/ratio stats — they
+                // remain a valid characterisation of this layer's compressibility
+                // and are needed by the aggregation path that feeds the bench
+                // summary.  A full wipe here would leave updateCount == 0, making
+                // the layer invisible to scope-filtered aggregation, and with
+                // kvSeqLen < triggerMin the bootstrap can never re-run.
                 layerState.losslessLastStep = 0;
-                layerState.losslessLastTokenBudget = 0;
-                layerState.losslessRawBytes = 0;
-                layerState.losslessCompressedBytes = 0;
-                layerState.losslessDecompressedBytes = 0;
-                layerState.losslessCompressUs = 0;
-                layerState.losslessDecompressUs = 0;
-                layerState.losslessFallbackCount = 0;
-                layerState.losslessUpdateCount = 0;
+                layerState.losslessLastTokenBudget = losslessTokenBudget;
             }
 
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
             const int blockStep = ALIMAX(1, mMeta->h2o_lossless_block_tokens);
-            // 192-token grouping matches the validated v3 online-sim setting and
-            // avoids frequent small-frame compression on decode path.
-            const int groupedStep = ALIMAX(blockStep, 192);
+            const int groupedStep = blockStep;
             const int64_t losslessStep = mH2OState->globalTokenStep;
             const int tokenBudgetGrowth = losslessTokenBudget - layerState.losslessLastTokenBudget;
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);

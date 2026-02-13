@@ -109,6 +109,23 @@ def main():
     trigger_mins = parse_list(args.h2o_trigger_min_tokens, int)
     target_lossy_ratios = parse_list(args.h2o_target_lossy_ratios, float)
 
+    sweep_dims = {
+        "prompts": prompts,
+        "gens": gens,
+        "keep_ratios": keep_ratios,
+        "block_tokens": block_tokens,
+        "sink_tokens": sink_tokens,
+        "recent_tokens": recent_tokens,
+        "ema_alphas": ema_alphas,
+        "update_intervals": update_intervals,
+        "trigger_mins": trigger_mins,
+        "target_lossy_ratios": target_lossy_ratios,
+    }
+    empty = [name for name, vals in sweep_dims.items() if not vals]
+    if empty:
+        raise SystemExit(f"Empty sweep dimension(s): {', '.join(empty)}. "
+                         f"Check argument values — 0 runs would be produced.")
+
     manifest = []
     any_fail = False
     run_idx = 0
