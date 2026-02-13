@@ -413,7 +413,7 @@ static size_t fp32LanePredictiveEncodedSize(const uint8_t* data,
     return encoded;
 }
 
-static void collectKvMergedRange(const CPUKVCacheManager* cacheManager,
+static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
                                  int kvNumHead,
                                  int headDim,
                                  int bytes,
