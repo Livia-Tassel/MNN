@@ -67,17 +67,44 @@ echo " OUT = ${OUT}"
 echo "============================================================"
 mkdir -p "${OUT}"
 
+# Bash here-docs create temporary files. On some servers /tmp may be full,
+# which causes early failures like:
+#   cannot create temp file for here-document: No space left on device
+# Route temp files to the run output directory instead.
+TMP_WORKDIR="${OUT}/.tmp"
+mkdir -p "${TMP_WORKDIR}"
+export TMPDIR="${TMP_WORKDIR}"
+
+# Preflight temp-dir writability and minimal free space (64 MiB).
+if ! touch "${TMPDIR}/.tmp_write_test" 2>/dev/null; then
+  echo "FAIL: cannot write to TMPDIR=${TMPDIR}"
+  exit 1
+fi
+rm -f "${TMPDIR}/.tmp_write_test"
+TMP_AVAIL_KB=$(df -Pk "${TMPDIR}" | awk 'NR==2 {print $4}')
+if [[ -z "${TMP_AVAIL_KB}" || "${TMP_AVAIL_KB}" -lt 65536 ]]; then
+  echo "FAIL: low free space in TMPDIR=${TMPDIR} (${TMP_AVAIL_KB:-unknown} KiB available)"
+  echo "Free some disk space and retry."
+  exit 1
+fi
+echo "Temp workspace: ${TMPDIR} (avail ${TMP_AVAIL_KB} KiB)"
+
 # ── Step 0: Quick Python-side regression checks ───────────────────────────
 echo ""
 echo "==== Step 0: Python-side regression checks ===="
 
 # Fix 4: empty sweep params should fail fast
 echo "[Fix 4] Testing empty sweep dimension detection..."
+EMPTY_DIR="${OUT}/throwaway_empty"
+mkdir -p "${EMPTY_DIR}"
+cat > "${EMPTY_DIR}/base_config.json" <<'JSONEOF'
+{}
+JSONEOF
 set +e
 EMPTY_OUT=$(python3 exp/h2o_v3/run_h2o_v3_bench.py \
   --llm-bench "${LLM_BENCH}" \
-  --base-config "${MODEL_CONFIG}" \
-  --out-dir "${OUT}/throwaway_empty" \
+  --base-config "${EMPTY_DIR}/base_config.json" \
+  --out-dir "${EMPTY_DIR}" \
   --h2o-keep-ratios "" \
   --dry-run 2>&1)
 EMPTY_RC=$?
@@ -89,7 +116,7 @@ else
   echo "  output: ${EMPTY_OUT}"
   STEP0_FAIL=1
 fi
-rm -rf "${OUT}/throwaway_empty"
+rm -rf "${EMPTY_DIR}"
 
 # Fix 5: dedup test — same file via --log-dir and --log-files
 echo "[Fix 5] Testing log file deduplication..."
@@ -345,6 +372,54 @@ if n_ok == 0:
     sys.exit(1)
 print('  PASS')
 " "${OUT}/h2o_metrics.csv"
+
+# ── Step 4.5: Lossy feasibility diagnosis ──────────────────────────────────
+echo ""
+echo "==== Step 4.5: Lossy feasibility diagnosis ===="
+python3 - "${OUT}/h2o_metrics.csv" "${LOSSY_TARGET}" <<'PY'
+import csv
+import re
+import sys
+
+
+def parse_mean(s):
+    if not s:
+        return 0.0
+    m = re.match(r"\s*([0-9eE.+-]+)", s.strip())
+    return float(m.group(1)) if m else 0.0
+
+
+csv_path = sys.argv[1]
+lossy_target = float(sys.argv[2])
+rows = list(csv.DictReader(open(csv_path, "r", encoding="utf-8")))
+if not rows:
+    print("  SKIP: empty CSV")
+    sys.exit(0)
+
+unreachable = 0
+for i, r in enumerate(rows, 1):
+    lossy = parse_mean(r.get("h2o_lossy", "0"))
+    floor_keep = parse_mean(r.get("h2o_floor_keep", "0"))
+    quant_keep = parse_mean(r.get("h2o_quantized_keep", "0"))
+    effective_keep = max(floor_keep, quant_keep, 1e-9)
+    theoretical_ceiling = 1.0 / effective_keep
+    reachable = theoretical_ceiling + 1e-6 >= lossy_target
+    status = "OK" if reachable else "UNREACHABLE"
+    if not reachable:
+        unreachable += 1
+    print(
+        f"  row#{i}: lossy={lossy:.3f} floor={floor_keep:.4f} "
+        f"quantized={quant_keep:.4f} theoretical_ceiling~{theoretical_ceiling:.3f} -> {status}"
+    )
+
+if unreachable > 0:
+    print(
+        f"  WARN: {unreachable}/{len(rows)} rows are structurally below "
+        f"lossy_target={lossy_target:.3f} (check sink/recent/block/keep settings)."
+    )
+else:
+    print("  PASS: all rows are structurally capable of reaching lossy target.")
+PY
 
 # ── Step 5: Validate Fix 6 — groupedStep uses blockStep ──────────────────
 echo ""
