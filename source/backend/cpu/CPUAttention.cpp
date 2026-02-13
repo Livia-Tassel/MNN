@@ -388,6 +388,31 @@ static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
     return encoded;
 }
 
+// Runtime bitstream size for fp32 by-lane predictor + payload compression.
+// Split every float word into 4 byte lanes and encode each lane independently.
+static size_t fp32LanePredictiveEncodedSize(const uint8_t* data,
+                                            size_t bytes,
+                                            const PredictorFlags& flags) {
+    if (data == nullptr || bytes < 4) {
+        return bytes;
+    }
+    const size_t words = bytes / 4;
+    std::vector<uint8_t> lane0(words), lane1(words), lane2(words), lane3(words);
+    for (size_t i = 0; i < words; ++i) {
+        lane0[i] = data[4 * i + 0];
+        lane1[i] = data[4 * i + 1];
+        lane2[i] = data[4 * i + 2];
+        lane3[i] = data[4 * i + 3];
+    }
+    std::vector<uint8_t> temp;
+    size_t encoded = 4; // word_count
+    encoded += predictiveRLEEncodedSize(lane0, flags, temp);
+    encoded += predictiveRLEEncodedSize(lane1, flags, temp);
+    encoded += predictiveRLEEncodedSize(lane2, flags, temp);
+    encoded += predictiveRLEEncodedSize(lane3, flags, temp);
+    return encoded;
+}
+
 ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
     auto gcore = static_cast<CPUBackend *>(backend())->functions();
     auto core = static_cast<CPUBackend*>(backend())->int8Functions();
@@ -1316,15 +1341,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
             const double logicalRawBytes = (double)evalTokens * (double)mKvNumHead * (double)mHeadDim * (double)mBytes * 2.0;
-            if (mBytes == 4) {
-                // Runtime v3 lossless codec is currently fp16-only.
-                stats.ratio = 1.0f;
-                stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
-                stats.compressedBytes = stats.rawBytes;
-                stats.decompressedBytes = stats.rawBytes;
-                stats.fallbackUsed = true;
-                return stats;
-            }
             const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
             const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
@@ -1357,25 +1373,35 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             + (size_t)(dim / lP) * keyStride1
                             + (size_t)(dim % lP);
                         const uint8_t* keyElem = keyPtr + keyIndex * (size_t)mBytes;
-                        keyMerged.push_back(keyElem[0]);
-                        keyMerged.push_back(keyElem[1]);
+                        for (int b = 0; b < mBytes; ++b) {
+                            keyMerged.push_back(keyElem[b]);
+                        }
 
                         const size_t valueIndex = (size_t)(dim / hP) * valueStride1
                             + (size_t)(dim % hP) * (size_t)lP
                             + valueInner;
                         const uint8_t* valueElem = valuePtr + valueIndex * (size_t)mBytes;
-                        valueMerged.push_back(valueElem[0]);
-                        valueMerged.push_back(valueElem[1]);
+                        for (int b = 0; b < mBytes; ++b) {
+                            valueMerged.push_back(valueElem[b]);
+                        }
                     }
                 }
             }
             const uint64_t rawFullBytes = (uint64_t)keyMerged.size() + (uint64_t)valueMerged.size();
             uint64_t compressedFullBytes = 0;
             if (!keyMerged.empty()) {
-                compressedFullBytes += fp16GearPredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags);
+                if (mBytes == 2) {
+                    compressedFullBytes += fp16GearPredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags);
+                } else {
+                    compressedFullBytes += fp32LanePredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags);
+                }
             }
             if (!valueMerged.empty()) {
-                compressedFullBytes += fp16GearPredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags);
+                if (mBytes == 2) {
+                    compressedFullBytes += fp16GearPredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags);
+                } else {
+                    compressedFullBytes += fp32LanePredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags);
+                }
             }
             if (rawFullBytes == 0 || compressedFullBytes == 0) {
                 stats.fallbackUsed = true;
