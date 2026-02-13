@@ -1192,6 +1192,16 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 return stats;
             }
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
+            const double logicalRawBytes = (double)evalTokens * (double)mKvNumHead * (double)mHeadDim * (double)mBytes * 2.0;
+            if (mBytes == 4) {
+                // Runtime v3 lossless codec is not online-enabled for fp32 path yet.
+                // Keep byte stats meaningful but conservative to avoid over-optimistic proxy values.
+                stats.ratio = 1.0f;
+                stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
+                stats.compressedBytes = stats.rawBytes;
+                stats.decompressedBytes = stats.rawBytes;
+                return stats;
+            }
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
             const size_t keyBytesPerHead = (size_t)UP_DIV(evalTokens, hP) * (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP * (size_t)mBytes;
             const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
