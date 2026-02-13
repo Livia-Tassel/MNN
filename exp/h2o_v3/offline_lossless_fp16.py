@@ -365,6 +365,61 @@ def compress_single_entry_chunked_fp16(fp16_bytes, seq_len, heads, head_dim, arg
     return total_compressed, diag
 
 
+def compress_grouped_entries_chunked_fp16(entries, args, compressor, tensor_name):
+    if not entries:
+        raise ValueError("empty group")
+    heads = int(entries[0]["kv_heads"])
+    head_dim = int(entries[0]["head_dim"])
+    chunks = []
+    for entry in entries:
+        if int(entry["kv_heads"]) != heads or int(entry["head_dim"]) != head_dim:
+            raise ValueError("inconsistent heads/head_dim in grouped-chunked group")
+        seq_len = int(entry["seq_len"])
+        fp16_bytes = entry["k_fp16"] if tensor_name == "k" else entry["v_fp16"]
+        expected_bytes = seq_len * heads * head_dim * 2
+        if len(fp16_bytes) != expected_bytes:
+            raise ValueError(
+                f"{tensor_name}: size mismatch in grouped-chunked group "
+                f"got={len(fp16_bytes)} expected={expected_bytes}"
+            )
+        chunks.append(np.frombuffer(fp16_bytes, dtype=np.uint16).reshape((seq_len, heads, head_dim)))
+    if len(chunks) == 1:
+        u16 = chunks[0]
+    else:
+        u16 = np.concatenate(chunks, axis=0)
+
+    total_seq = int(u16.shape[0])
+    seq_chunks = split_seq_chunks(total_seq, args.online_chunk_seq)
+    total_compressed = 0
+    total_chunk_meta = 0
+    hi_mode_counts = {}
+    lo_mode_counts = {}
+    for start, end in seq_chunks:
+        part = u16[start:end]
+        part_comp, part_diag = compress_tensor_from_u16(
+            part,
+            args=args,
+            compressor=compressor,
+            tensor_name=tensor_name,
+            chunk_count=1,
+            include_chunk_meta=False,
+        )
+        part_comp += int(args.online_framing_bytes)
+        total_compressed += int(part_comp)
+        total_chunk_meta += int(args.online_framing_bytes)
+        merge_mode_counts(hi_mode_counts, part_diag["hi"]["mode_counts"])
+        merge_mode_counts(lo_mode_counts, part_diag["lo"]["mode_counts"])
+
+    diag = {
+        "tensor_name": tensor_name,
+        "chunk_count": len(seq_chunks),
+        "chunk_meta_bytes": total_chunk_meta,
+        "hi": {"mode_counts": hi_mode_counts},
+        "lo": {"mode_counts": lo_mode_counts},
+    }
+    return total_compressed, diag
+
+
 def normalize_to_fp16(data, bytes_per_elem, strict_fp16):
     if bytes_per_elem == 2:
         return data, "fp16"
@@ -480,7 +535,11 @@ def main():
     parser.add_argument("--strict-fp16", action="store_true", help="If set, skip entries with bytes_per_elem=4 instead of converting.")
     parser.add_argument("--min-seq-len", type=int, default=0)
     parser.add_argument("--max-seq-len", type=int, default=0)
-    parser.add_argument("--entry-mode", choices=["per_meta", "aggregate", "chunked"], default="per_meta")
+    parser.add_argument(
+        "--entry-mode",
+        choices=["per_meta", "aggregate", "chunked", "chunked_grouped"],
+        default="per_meta",
+    )
     parser.add_argument(
         "--online-chunk-seq",
         type=int,
@@ -719,7 +778,7 @@ def main():
             merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
             merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
             merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
-    else:
+    elif args.entry_mode == "chunked":
         for entry in selected_entries:
             seq_len = int(entry["seq_len"])
             heads = int(entry["kv_heads"])
@@ -733,6 +792,32 @@ def main():
                 v_comp, v_diag = compress_single_entry_chunked_fp16(
                     entry["v_fp16"], seq_len, heads, head_dim, args, compressor, tensor_name="v"
                 )
+            except Exception:
+                skip("compression_failed")
+                continue
+            k_compressed_bytes += k_comp
+            v_compressed_bytes += v_comp
+            k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
+            v_chunk_meta_bytes += int(v_diag.get("chunk_meta_bytes", 0))
+            online_chunks += int(k_diag.get("chunk_count", 0)) + int(v_diag.get("chunk_count", 0))
+            merge_mode_counts(k_hi_mode_counts, k_diag["hi"]["mode_counts"])
+            merge_mode_counts(k_lo_mode_counts, k_diag["lo"]["mode_counts"])
+            merge_mode_counts(v_hi_mode_counts, v_diag["hi"]["mode_counts"])
+            merge_mode_counts(v_lo_mode_counts, v_diag["lo"]["mode_counts"])
+    else:
+        groups = {}
+        for entry in selected_entries:
+            key = make_group_key(entry, aggregate_by_stage=args.aggregate_by_stage)
+            groups.setdefault(key, []).append(entry)
+        aggregate_groups = len(groups)
+
+        for _, entries in groups.items():
+            entries.sort(key=lambda x: (int(x["seq_start"]), int(x["order_idx"])))
+            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
+            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
+            try:
+                k_comp, k_diag = compress_grouped_entries_chunked_fp16(entries, args, compressor, tensor_name="k")
+                v_comp, v_diag = compress_grouped_entries_chunked_fp16(entries, args, compressor, tensor_name="v")
             except Exception:
                 skip("compression_failed")
                 continue

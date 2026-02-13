@@ -63,6 +63,24 @@ python3 exp/h2o_v3/offline_lossless_fp16.py \
   --out-md exp/h2o_v3/out_tune_v3_xxx/offline_lossless_online.md
 ```
 
+## Offline Lossless (Online Sim, Request-Layer Stream)
+Use when `chunked` is stuck below target. This keeps online chunk framing but
+compresses along each request-layer stream instead of resetting per meta entry.
+```bash
+python3 exp/h2o_v3/offline_lossless_fp16.py \
+  --dump-dir /path/to/kv_dumps \
+  --scope front_n \
+  --front-n 2 \
+  --stage both \
+  --entry-mode chunked_grouped \
+  --online-chunk-seq 192 \
+  --online-framing-bytes 8 \
+  --codec-mode adaptive_v22 \
+  --adaptive-block-seq 64 \
+  --out-json exp/h2o_v3/out_tune_v3_xxx/offline_lossless_online_grouped.json \
+  --out-md exp/h2o_v3/out_tune_v3_xxx/offline_lossless_online_grouped.md
+```
+
 ## Merge + Quality Gate
 ```bash
 python3 exp/h2o_v3/analyze_h2o_v3.py \
@@ -87,6 +105,10 @@ python3 exp/h2o_v3/analyze_h2o_v3.py \
 ## Notes
 - Use a new `--out-dir` each run to avoid overriding old results.
 - `offline_lossless_fp16.py` has overwrite protection; add `--overwrite` only when you intentionally replace outputs.
+- `run_full_eval.sh` supports optional tuning args:
+  - `online_chunk_seq` (default `128`)
+  - `online_framing_bytes` (default `16`)
+  - `adaptive_block_seq` (default `64`)
 - Runtime benchmark now exposes additional lossless fields:
   - `h2o_lossless_raw_mb`
   - `h2o_lossless_comp_mb`
