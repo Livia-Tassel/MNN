@@ -1672,17 +1672,23 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 (float)((double)totalRawBytes / (double)totalCompressedBytes);
         }
 
-        // Always expose global lossless stats for current request.
-        // front_n scope only updates on early layers, but bench reads context once per response.
-        mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
-        mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
-        mMeta->h2o_lossless_raw_bytes = mH2OState->globalLastLosslessRawBytes;
-        mMeta->h2o_lossless_compressed_bytes = mH2OState->globalLastLosslessCompressedBytes;
-        mMeta->h2o_lossless_decompressed_bytes = mH2OState->globalLastLosslessDecompressedBytes;
-        mMeta->h2o_lossless_compress_us = mH2OState->globalLastLosslessCompressUs;
-        mMeta->h2o_lossless_decompress_us = mH2OState->globalLastLosslessDecompressUs;
+        // Only overwrite meta stats when we have valid lossless byte accounting.
+        // This prevents later non-lossless layers from clobbering earlier valid stats
+        // with per-layer default values (1.0 / 0.0) in the bench summary path.
+        const bool hasValidLosslessStats =
+            mH2OState->globalLastLosslessRawBytes > 0
+            && mH2OState->globalLastLosslessCompressedBytes > 0;
+        if (hasValidLosslessStats) {
+            mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
+            mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
+            mMeta->h2o_lossless_raw_bytes = mH2OState->globalLastLosslessRawBytes;
+            mMeta->h2o_lossless_compressed_bytes = mH2OState->globalLastLosslessCompressedBytes;
+            mMeta->h2o_lossless_decompressed_bytes = mH2OState->globalLastLosslessDecompressedBytes;
+            mMeta->h2o_lossless_compress_us = mH2OState->globalLastLosslessCompressUs;
+            mMeta->h2o_lossless_decompress_us = mH2OState->globalLastLosslessDecompressUs;
+            mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
+        }
         mMeta->h2o_lossless_queue_depth_peak = mH2OState->globalLosslessQueueDepthPeak;
-        mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
     }
 
     backend()->onReleaseBuffer(unpackQK.get(), Backend::STATIC);
