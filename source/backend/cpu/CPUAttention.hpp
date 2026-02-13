@@ -33,6 +33,15 @@ private:
     struct H2OSharedState {
         struct LayerState {
             std::vector<float> blockScores;
+            int64_t losslessLastStep = 0;
+            int losslessLastTokenBudget = 0;
+            uint64_t losslessRawBytes = 0;
+            uint64_t losslessCompressedBytes = 0;
+            uint64_t losslessDecompressedBytes = 0;
+            int64_t losslessCompressUs = 0;
+            int64_t losslessDecompressUs = 0;
+            int64_t losslessFallbackCount = 0;
+            int64_t losslessUpdateCount = 0;
         };
         std::vector<LayerState> layerStates;
         std::vector<int> reserveStorage;
