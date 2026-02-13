@@ -11,8 +11,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <limits>
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
 #include "CPUAttention.hpp"
 #include "CPUBackend.hpp"
 #include "compute/CommonOptFunction.h"
@@ -160,6 +164,66 @@ struct PredictorFlags {
     bool xorSeq = false;
 };
 
+struct ZstdApi {
+    bool initialized = false;
+    bool available = false;
+#if !defined(_WIN32)
+    void* handle = nullptr;
+    size_t (*compressBound)(size_t) = nullptr;
+    size_t (*compress)(void*, size_t, const void*, size_t, int) = nullptr;
+    unsigned (*isError)(size_t) = nullptr;
+#endif
+};
+
+static ZstdApi& getZstdApi() {
+    static ZstdApi api;
+    if (api.initialized) {
+        return api;
+    }
+    api.initialized = true;
+#if !defined(_WIN32)
+    const char* libs[] = {"libzstd.so.1", "libzstd.so", "libzstd.dylib"};
+    for (const auto* lib : libs) {
+        api.handle = dlopen(lib, RTLD_LAZY | RTLD_LOCAL);
+        if (api.handle != nullptr) {
+            break;
+        }
+    }
+    if (api.handle != nullptr) {
+        api.compressBound = reinterpret_cast<size_t(*)(size_t)>(dlsym(api.handle, "ZSTD_compressBound"));
+        api.compress = reinterpret_cast<size_t(*)(void*, size_t, const void*, size_t, int)>(dlsym(api.handle, "ZSTD_compress"));
+        api.isError = reinterpret_cast<unsigned(*)(size_t)>(dlsym(api.handle, "ZSTD_isError"));
+        api.available = (api.compressBound != nullptr && api.compress != nullptr && api.isError != nullptr);
+    }
+#endif
+    return api;
+}
+
+static size_t zstdEncodedSize(const uint8_t* data, size_t n, int level) {
+    if (data == nullptr || n == 0) {
+        return 0;
+    }
+    auto& api = getZstdApi();
+    if (!api.available) {
+        return 0;
+    }
+#if !defined(_WIN32)
+    const size_t bound = api.compressBound(n);
+    if (bound == 0 || bound < n / 2) {
+        return 0;
+    }
+    std::vector<uint8_t> out(bound);
+    const size_t ret = api.compress(out.data(), out.size(), data, n, level);
+    if (api.isError(ret) != 0) {
+        return 0;
+    }
+    return ret;
+#else
+    (void)level;
+    return 0;
+#endif
+}
+
 static PredictorFlags parsePredictorFlags(const std::string& spec, bool defaultRaw) {
     PredictorFlags flags;
     flags.raw = defaultRaw;
@@ -260,36 +324,50 @@ static size_t rleEncodedSize(const uint8_t* data, size_t n) {
     return outBytes;
 }
 
-// Encode one byte stream with predictor search and RLE payload.
+// Encode one byte stream with predictor search and payload compression.
 // Frame bytes:
 // - mode: 1 byte (0 raw, 1 delta_seq, 2 xor_seq)
+// - codec: 1 byte (0 RLE, 1 zstd)
 // - original length: 4 bytes (LE)
-// - payload: RLE bytes
+// - payload bytes
 static size_t predictiveRLEEncodedSize(const std::vector<uint8_t>& src,
                                        const PredictorFlags& flags,
                                        std::vector<uint8_t>& temp) {
     if (src.empty()) {
-        return 5;
+        return 6;
     }
     size_t bestPayload = std::numeric_limits<size_t>::max();
+    const int zstdLevel = 3;
+    auto betterPayload = [&](const std::vector<uint8_t>& stream) -> size_t {
+        const size_t rleBytes = rleEncodedSize(stream.data(), stream.size());
+        size_t best = rleBytes;
+        const size_t zstdBytes = zstdEncodedSize(stream.data(), stream.size(), zstdLevel);
+        if (zstdBytes > 0) {
+            best = ALIMIN(best, zstdBytes);
+        }
+        return best;
+    };
     if (flags.raw) {
-        bestPayload = ALIMIN(bestPayload, rleEncodedSize(src.data(), src.size()));
+        bestPayload = ALIMIN(bestPayload, betterPayload(src));
     }
     if (flags.deltaSeq) {
         buildDeltaSeq(src, temp);
-        bestPayload = ALIMIN(bestPayload, rleEncodedSize(temp.data(), temp.size()));
+        bestPayload = ALIMIN(bestPayload, betterPayload(temp));
     }
     if (flags.xorSeq) {
         buildXorSeq(src, temp);
-        bestPayload = ALIMIN(bestPayload, rleEncodedSize(temp.data(), temp.size()));
+        bestPayload = ALIMIN(bestPayload, betterPayload(temp));
     }
     if (bestPayload == std::numeric_limits<size_t>::max()) {
-        bestPayload = rleEncodedSize(src.data(), src.size());
+        bestPayload = betterPayload(src);
     }
-    return 1 + 4 + bestPayload;
+    // stream frame bytes:
+    // mode(1) + codec(1) + raw_len(4) + payload
+    return 1 + 1 + 4 + bestPayload;
 }
 
-// Runtime bitstream size for fp16 gear-split + predictor + RLE.
+// Runtime bitstream size for fp16 gear-split + predictor + payload compression
+// (prefer zstd level-3 if available, fallback to RLE).
 static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
                                             size_t bytes,
                                             const PredictorFlags& loFlags,
