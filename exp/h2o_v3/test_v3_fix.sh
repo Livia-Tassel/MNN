@@ -27,15 +27,15 @@ THREADS=4
 BACKEND="cpu"
 
 # H2O lossy
-H2O_KEEP_RATIO="0.5"
-H2O_BLOCK_TOKENS="64"
-H2O_SINK_TOKENS="32"
-H2O_RECENT_TOKENS="256"
+H2O_KEEP_RATIO="0.30"
+H2O_BLOCK_TOKENS="32"
+H2O_SINK_TOKENS="16"
+H2O_RECENT_TOKENS="64"
 H2O_TARGET_MODE="adaptive"
-H2O_TARGET_LOSSY_RATIO="3.0"
+H2O_TARGET_LOSSY_RATIO="3.2"
 H2O_EMA_ALPHA="0.9"
 H2O_UPDATE_INTERVAL="16"
-H2O_TRIGGER_MIN="512"
+H2O_TRIGGER_MIN="384"
 H2O_LAYER_START=2
 H2O_LAYER_END=-1
 
@@ -51,7 +51,7 @@ KV_LOSSLESS_CODEC_RUNTIME="fp16_gear_predictive_v3"
 # Quality gate
 LOSSY_TARGET=3.0
 LOSSLESS_TARGET=1.3
-DECODE_BASELINE=6.72
+DECODE_BASELINE=6.60
 DECODE_DROP_TARGET=0.05
 
 # Offline lossless
@@ -484,6 +484,14 @@ python3 exp/h2o_v3/analyze_h2o_v3.py \
   --decode-baseline "${DECODE_BASELINE}" \
   --decode-drop-target "${DECODE_DROP_TARGET}" \
   --out "${OUT}/summary.md"
+
+echo "Quality Gate Snapshot:"
+awk '
+  BEGIN {in_gate=0}
+  /^## Quality Gate/ {in_gate=1; next}
+  in_gate && /^## / {in_gate=0}
+  in_gate && /^- / {print "  " $0}
+' "${OUT}/summary.md"
 
 if ! grep -Eq '^- overall_pass: true$' "${OUT}/summary.md"; then
   echo "FAIL: quality gate did not pass (overall_pass != true)."
