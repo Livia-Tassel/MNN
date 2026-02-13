@@ -1353,21 +1353,29 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
             const size_t keyBytesPerHead = (size_t)UP_DIV(evalTokens, hP) * (size_t)ROUND_UP(mHeadDim, lP) * (size_t)hP * (size_t)mBytes;
             const size_t valueBytesPerHead = (size_t)UP_DIV(evalTokens, flashBlockKv) * (size_t)ROUND_UP(mHeadDim, hP) * (size_t)ROUND_UP(flashBlockKv, lP) * (size_t)mBytes;
-            uint64_t rawFullBytes = 0;
-            uint64_t compressedFullBytes = 0;
+            std::vector<uint8_t> keyMerged;
+            std::vector<uint8_t> valueMerged;
+            keyMerged.reserve((size_t)mKvNumHead * keyBytesPerHead);
+            valueMerged.reserve((size_t)mKvNumHead * valueBytesPerHead);
             for (int h = 0; h < mKvNumHead; ++h) {
                 const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfKey(h));
                 const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(mKVCacheManager->addrOfValue(h));
-                const auto sample = encodeGearDeltaLosslessStats(
-                    keyPtr,
-                    keyBytesPerHead,
-                    valuePtr,
-                    valueBytesPerHead,
-                    keyFlags,
-                    valueFlags
-                );
-                rawFullBytes += sample.rawBytes;
-                compressedFullBytes += sample.compressedBytes;
+                if (keyPtr != nullptr && keyBytesPerHead >= 2) {
+                    const size_t keyAlignedBytes = (keyBytesPerHead / 2) * 2;
+                    keyMerged.insert(keyMerged.end(), keyPtr, keyPtr + keyAlignedBytes);
+                }
+                if (valuePtr != nullptr && valueBytesPerHead >= 2) {
+                    const size_t valueAlignedBytes = (valueBytesPerHead / 2) * 2;
+                    valueMerged.insert(valueMerged.end(), valuePtr, valuePtr + valueAlignedBytes);
+                }
+            }
+            const uint64_t rawFullBytes = (uint64_t)keyMerged.size() + (uint64_t)valueMerged.size();
+            uint64_t compressedFullBytes = 0;
+            if (!keyMerged.empty()) {
+                compressedFullBytes += fp16GearPredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags);
+            }
+            if (!valueMerged.empty()) {
+                compressedFullBytes += fp16GearPredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags);
             }
             if (rawFullBytes == 0 || compressedFullBytes == 0) {
                 stats.fallbackUsed = true;
