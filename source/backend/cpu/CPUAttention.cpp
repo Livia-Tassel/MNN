@@ -660,8 +660,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             // Token-level clock for expensive lossless runtime updates.
             mH2OState->globalTokenStep += 1;
         }
-    } else if (mMeta != nullptr && mH2OState != nullptr) {
+    } else if (mMeta != nullptr && mH2OState != nullptr && kvSeqLen <= seqLen) {
         // New prefill/request path: clear decode-side lossless running stats.
+        // Guard by kvSeqLen<=seqLen to avoid accidental reset during decode if h2o_in_decode flag jitters.
         mH2OState->decodeLayerCursor = 0;
         mH2OState->globalStep = 0;
         mH2OState->globalTokenStep = 0;
