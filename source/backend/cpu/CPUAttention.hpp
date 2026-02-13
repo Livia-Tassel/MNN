@@ -38,6 +38,7 @@ private:
         std::vector<int> reserveStorage;
         int64_t decodeLayerCursor = 0;
         int64_t globalStep = 0;
+        int64_t globalTokenStep = 0;
         int64_t globalLastTriggerStep = 0;
         int64_t globalLastLosslessStep = 0;
         float globalLastLosslessRatio = 1.0f;

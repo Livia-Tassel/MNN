@@ -656,10 +656,15 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         layerIndex = static_cast<int>(mH2OState->decodeLayerCursor % static_cast<int64_t>(layerCount));
         mH2OState->decodeLayerCursor += 1;
         mH2OState->globalStep += 1;
+        if (layerIndex == 0) {
+            // Token-level clock for expensive lossless runtime updates.
+            mH2OState->globalTokenStep += 1;
+        }
     } else if (mMeta != nullptr && mH2OState != nullptr) {
         // New prefill/request path: clear decode-side lossless running stats.
         mH2OState->decodeLayerCursor = 0;
         mH2OState->globalStep = 0;
+        mH2OState->globalTokenStep = 0;
         mH2OState->globalLastTriggerStep = 0;
         mH2OState->globalLastLosslessStep = 0;
         mH2OState->globalLastLosslessRatio = 1.0f;
@@ -1445,8 +1450,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         if (applyLossless) {
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
+            const int64_t losslessStep = mH2OState->globalTokenStep;
             const bool shouldUpdateLossless = kvSeqLen >= triggerMin
-                && (mH2OState->globalStep - mH2OState->globalLastLosslessStep >= updateInterval);
+                && (losslessStep - mH2OState->globalLastLosslessStep >= updateInterval);
             if (shouldUpdateLossless || mH2OState->globalLastLosslessRatio <= 1.0f) {
                 auto c0 = std::chrono::high_resolution_clock::now();
                 const auto stats = estimateLosslessRuntimeStats(losslessTokenBudget);
@@ -1459,7 +1465,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessDecompressedBytes = stats.decompressedBytes;
                 mH2OState->globalLastLosslessCompressUs = mH2OState->globalLastLosslessCodecUs;
                 mH2OState->globalLastLosslessDecompressUs = 0;
-                mH2OState->globalLastLosslessStep = mH2OState->globalStep;
+                mH2OState->globalLastLosslessStep = losslessStep;
                 if (stats.fallbackUsed) {
                     mH2OState->globalLosslessFallbackCount += 1;
                     if (mMeta->h2o_log_stats != 0) {
