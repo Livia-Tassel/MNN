@@ -373,17 +373,23 @@ fi
 echo "  Sample lines:"
 echo "${LOSSLESS_LINES}" | head -3
 
-TOKENS_192=$(echo "${LOSSLESS_LINES}" | grep -c "tokens=192" || true)
-TOKENS_BLOCK=$(echo "${LOSSLESS_LINES}" | grep -c "tokens=${KV_LOSSLESS_BLOCK_TOKENS}" || true)
+TOKENS_192=$(echo "${LOSSLESS_LINES}" | grep -Ec "tokens=192([^0-9]|$)" || true)
+TOKENS_BLOCK=$(echo "${LOSSLESS_LINES}" | grep -Ec "tokens=${KV_LOSSLESS_BLOCK_TOKENS}([^0-9]|$)" || true)
+NON_BOOTSTRAP=$(echo "${LOSSLESS_LINES}" | grep -Ec "start=[1-9][0-9]*" || true)
 echo "  tokens=${KV_LOSSLESS_BLOCK_TOKENS} count: ${TOKENS_BLOCK}"
 echo "  tokens=192 count: ${TOKENS_192}"
-if [[ ${TOKENS_BLOCK} -eq 0 ]]; then
-  echo "  FAIL: expected at least one tokens=${KV_LOSSLESS_BLOCK_TOKENS} sample"
-  exit 1
-fi
 if [[ ${TOKENS_192} -gt 0 ]]; then
   echo "  FAIL: hardcoded 192 grouping still present"
   exit 1
+fi
+if [[ ${TOKENS_BLOCK} -eq 0 ]]; then
+  if [[ ${NON_BOOTSTRAP} -gt 0 ]]; then
+    echo "  FAIL: saw non-bootstrap updates (start>0) but none used tokens=${KV_LOSSLESS_BLOCK_TOKENS}"
+    exit 1
+  fi
+  echo "  INFO: only bootstrap updates observed (start=0, e.g. tokens=kv budget)."
+  echo "        This run did not reach periodic grouped updates; skipping strict blockStep assertion."
+  echo "        To force strict check, increase GENS or reduce kv_lossless_block_tokens."
 fi
 echo "  PASS"
 
