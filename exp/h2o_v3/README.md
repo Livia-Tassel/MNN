@@ -94,6 +94,40 @@ python3 exp/h2o_v3/analyze_h2o_v3.py \
   --out exp/h2o_v3/out_tune_v3_xxx/summary.md
 ```
 
+## One-Command Full Eval
+`run_full_eval.sh` runs: parse logs -> offline upper -> offline online-sim -> quality gate.
+By default it uses `chunked_grouped` as online-sim source.
+```bash
+bash exp/h2o_v3/run_full_eval.sh \
+  exp/h2o_v3/out_tune_v3_xxx \
+  /path/to/kv_dumps \
+  1.3 \
+  6.72 \
+  0.05 \
+  192 \
+  8 \
+  64 \
+  chunked_grouped
+```
+
+To compare both online modes in one run:
+```bash
+bash exp/h2o_v3/run_full_eval.sh \
+  exp/h2o_v3/out_tune_v3_xxx \
+  /path/to/kv_dumps \
+  1.3 \
+  6.72 \
+  0.05 \
+  192 \
+  8 \
+  64 \
+  both
+```
+This writes:
+- `summary_chunked.md`
+- `summary_grouped.md`
+- `summary.md` (alias to grouped)
+
 ## Quality Gate Rule
 - `lossy_pass`: best runtime `h2o_lossy >= 3.0`
 - `lossless_online_pass`: online-sim lossless `>= 1.3`
@@ -109,6 +143,7 @@ python3 exp/h2o_v3/analyze_h2o_v3.py \
   - `online_chunk_seq` (default `128`)
   - `online_framing_bytes` (default `16`)
   - `adaptive_block_seq` (default `64`)
+  - `online_entry_mode` (default `chunked_grouped`, choices: `chunked`, `chunked_grouped`, `both`)
 - Runtime benchmark now exposes additional lossless fields:
   - `h2o_lossless_raw_mb`
   - `h2o_lossless_comp_mb`

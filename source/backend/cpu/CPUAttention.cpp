@@ -1182,6 +1182,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             uint64_t rawBytes = 0;
             uint64_t compressedBytes = 0;
             uint64_t decompressedBytes = 0;
+            bool fallbackUsed = false;
         };
         auto estimateLosslessRuntimeStats = [&](int tokenBudget) -> LosslessRuntimeStats {
             LosslessRuntimeStats stats;
@@ -1189,6 +1190,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 return stats;
             }
             if (mBytes != 2 && mBytes != 4) {
+                stats.fallbackUsed = true;
                 return stats;
             }
             const int evalTokens = clampInt(tokenBudget, 1, kvSeqLen);
@@ -1200,6 +1202,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
                 stats.compressedBytes = stats.rawBytes;
                 stats.decompressedBytes = stats.rawBytes;
+                stats.fallbackUsed = true;
                 return stats;
             }
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
@@ -1226,6 +1229,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 rawFullBytes += static_cast<double>(keyBytesPerHead + valueBytesPerHead);
             }
             if (rawSampleBytes <= 0.0 || compressedSampleBytes <= 0.0 || rawFullBytes <= 0.0) {
+                stats.fallbackUsed = true;
                 return stats;
             }
             const double ratio = ALIMAX(1.0, rawSampleBytes / compressedSampleBytes);
@@ -1266,6 +1270,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessCompressUs = mH2OState->globalLastLosslessCodecUs;
                 mH2OState->globalLastLosslessDecompressUs = 0;
                 mH2OState->globalLastLosslessStep = mH2OState->globalStep;
+                if (stats.fallbackUsed) {
+                    mH2OState->globalLosslessFallbackCount += 1;
+                }
             }
         }
         // Always expose global lossless stats for current request.
