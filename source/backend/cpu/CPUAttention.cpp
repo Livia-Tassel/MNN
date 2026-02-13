@@ -1295,8 +1295,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
         struct LosslessRuntimeStats {
             float ratio = 1.0f;
+            float attemptedRatio = 1.0f;
             uint64_t rawBytes = 0;
             uint64_t compressedBytes = 0;
+            uint64_t attemptedCompressedBytes = 0;
             uint64_t decompressedBytes = 0;
             bool fallbackUsed = false;
         };
@@ -1379,9 +1381,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 stats.fallbackUsed = true;
                 stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
                 stats.compressedBytes = stats.rawBytes;
+                stats.attemptedCompressedBytes = stats.rawBytes;
                 stats.decompressedBytes = stats.rawBytes;
                 return stats;
             }
+            stats.attemptedCompressedBytes = compressedFullBytes;
+            stats.attemptedRatio = compressedFullBytes > 0
+                ? static_cast<float>((double)rawFullBytes / (double)compressedFullBytes)
+                : 1.0f;
             // If compression expands, count as runtime fallback and keep RAW.
             if (compressedFullBytes > rawFullBytes) {
                 compressedFullBytes = rawFullBytes;
@@ -1429,6 +1436,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessStep = mH2OState->globalStep;
                 if (stats.fallbackUsed) {
                     mH2OState->globalLosslessFallbackCount += 1;
+                    if (mMeta->h2o_log_stats != 0) {
+                        const bool zstdReady = getZstdApi().available;
+                        MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f zstd=%d\n",
+                                  layerIndex,
+                                  kvSeqLen,
+                                  (unsigned long long)stats.rawBytes,
+                                  (unsigned long long)stats.attemptedCompressedBytes,
+                                  (unsigned long long)stats.compressedBytes,
+                                  stats.attemptedRatio,
+                                  stats.ratio,
+                                  zstdReady ? 1 : 0);
+                    }
                 }
             }
         }
