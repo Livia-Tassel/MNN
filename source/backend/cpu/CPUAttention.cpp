@@ -1599,6 +1599,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         int64_t totalFallbackCount = 0;
         const int losslessScope = mMeta->h2o_lossless_scope;
         const int frontN = ALIMAX(0, mMeta->h2o_lossless_front_n);
+        bool hasIncludedLayer = false;
         for (int i = 0; i < (int)mH2OState->layerStates.size(); ++i) {
             bool include = false;
             if (losslessScope == 1) { // front_n
@@ -1610,12 +1611,39 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 continue;
             }
             const auto& layerState = mH2OState->layerStates[i];
+            if (layerState.losslessUpdateCount <= 0) {
+                continue;
+            }
+            hasIncludedLayer = true;
             totalRawBytes += layerState.losslessRawBytes;
             totalCompressedBytes += layerState.losslessCompressedBytes;
             totalDecompressedBytes += layerState.losslessDecompressedBytes;
             totalCompressUs += layerState.losslessCompressUs;
             totalDecompressUs += layerState.losslessDecompressUs;
             totalFallbackCount += layerState.losslessFallbackCount;
+        }
+
+        // Safety fallback: if scope-filtered selection yields no valid layer,
+        // aggregate all layers that have runtime lossless updates.
+        if (!hasIncludedLayer) {
+            totalRawBytes = 0;
+            totalCompressedBytes = 0;
+            totalDecompressedBytes = 0;
+            totalCompressUs = 0;
+            totalDecompressUs = 0;
+            totalFallbackCount = 0;
+            for (int i = 0; i < (int)mH2OState->layerStates.size(); ++i) {
+                const auto& layerState = mH2OState->layerStates[i];
+                if (layerState.losslessUpdateCount <= 0) {
+                    continue;
+                }
+                totalRawBytes += layerState.losslessRawBytes;
+                totalCompressedBytes += layerState.losslessCompressedBytes;
+                totalDecompressedBytes += layerState.losslessDecompressedBytes;
+                totalCompressUs += layerState.losslessCompressUs;
+                totalDecompressUs += layerState.losslessDecompressUs;
+                totalFallbackCount += layerState.losslessFallbackCount;
+            }
         }
 
         mH2OState->globalLastLosslessRawBytes = totalRawBytes;
