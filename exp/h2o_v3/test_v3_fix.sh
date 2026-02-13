@@ -269,10 +269,35 @@ echo ""
 echo "==== Step 1: Dry-run config generation ===="
 python3 exp/h2o_v3/run_h2o_v3_bench.py "${BENCH_ARGS[@]}" --dry-run
 
-echo "Generated configs:"
-ls -1 "${OUT}/configs/"
+if [[ ! -d "${OUT}/configs" ]]; then
+  echo "FAIL: missing configs dir after dry-run: ${OUT}/configs"
+  exit 1
+fi
+mapfile -t CFGS < <(find "${OUT}/configs" -maxdepth 1 -type f -name '*.json' | sort)
+if [[ ${#CFGS[@]} -eq 0 ]]; then
+  echo "FAIL: no generated config JSON found under ${OUT}/configs"
+  exit 1
+fi
+echo "Generated configs (${#CFGS[@]}):"
+for cfg in "${CFGS[@]}"; do
+  echo "  $(basename "${cfg}")"
+done
+
+if [[ ! -s "${OUT}/manifest.json" ]]; then
+  echo "FAIL: missing or empty manifest: ${OUT}/manifest.json"
+  exit 1
+fi
 echo "Manifest:"
-python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print(f'{len(m)} runs'); [print(f'  {r[\"run_id\"]}') for r in m]" "${OUT}/manifest.json"
+python3 - "${OUT}/manifest.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+data = json.loads(open(path, "r", encoding="utf-8").read())
+print(f"{len(data)} runs")
+for row in data:
+    print(f"  {row.get('run_id', '<missing_run_id>')}")
+PY
 
 # ── Step 2: Actual benchmark run ──────────────────────────────────────────
 echo ""
