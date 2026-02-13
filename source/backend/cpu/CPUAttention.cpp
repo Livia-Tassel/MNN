@@ -515,6 +515,21 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         layerIndex = static_cast<int>(mH2OState->decodeLayerCursor % static_cast<int64_t>(layerCount));
         mH2OState->decodeLayerCursor += 1;
         mH2OState->globalStep += 1;
+    } else if (mMeta != nullptr && mH2OState != nullptr) {
+        // New prefill/request path: clear decode-side lossless running stats.
+        mH2OState->decodeLayerCursor = 0;
+        mH2OState->globalStep = 0;
+        mH2OState->globalLastTriggerStep = 0;
+        mH2OState->globalLastLosslessStep = 0;
+        mH2OState->globalLastLosslessRatio = 1.0f;
+        mH2OState->globalLastLosslessCodecUs = 0;
+        mH2OState->globalLastLosslessRawBytes = 0;
+        mH2OState->globalLastLosslessCompressedBytes = 0;
+        mH2OState->globalLastLosslessDecompressedBytes = 0;
+        mH2OState->globalLastLosslessCompressUs = 0;
+        mH2OState->globalLastLosslessDecompressUs = 0;
+        mH2OState->globalLosslessQueueDepthPeak = 0;
+        mH2OState->globalLosslessFallbackCount = 0;
     }
     int h2oLayerStart = 0;
     int h2oLayerEnd = layerCount - 1;
@@ -1242,26 +1257,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessDecompressUs = 0;
                 mH2OState->globalLastLosslessStep = mH2OState->globalStep;
             }
-            mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
-            mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
-            mMeta->h2o_lossless_raw_bytes = mH2OState->globalLastLosslessRawBytes;
-            mMeta->h2o_lossless_compressed_bytes = mH2OState->globalLastLosslessCompressedBytes;
-            mMeta->h2o_lossless_decompressed_bytes = mH2OState->globalLastLosslessDecompressedBytes;
-            mMeta->h2o_lossless_compress_us = mH2OState->globalLastLosslessCompressUs;
-            mMeta->h2o_lossless_decompress_us = mH2OState->globalLastLosslessDecompressUs;
-            mMeta->h2o_lossless_queue_depth_peak = mH2OState->globalLosslessQueueDepthPeak;
-            mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
-        } else {
-            mMeta->h2o_lossless_ratio = 1.0f;
-            mMeta->h2o_codec_us = 0;
-            mMeta->h2o_lossless_raw_bytes = 0;
-            mMeta->h2o_lossless_compressed_bytes = 0;
-            mMeta->h2o_lossless_decompressed_bytes = 0;
-            mMeta->h2o_lossless_compress_us = 0;
-            mMeta->h2o_lossless_decompress_us = 0;
-            mMeta->h2o_lossless_queue_depth_peak = 0;
-            mMeta->h2o_lossless_fallback_count = 0;
         }
+        // Always expose global lossless stats for current request.
+        // front_n scope only updates on early layers, but bench reads context once per response.
+        mMeta->h2o_lossless_ratio = mH2OState->globalLastLosslessRatio;
+        mMeta->h2o_codec_us = mH2OState->globalLastLosslessCodecUs;
+        mMeta->h2o_lossless_raw_bytes = mH2OState->globalLastLosslessRawBytes;
+        mMeta->h2o_lossless_compressed_bytes = mH2OState->globalLastLosslessCompressedBytes;
+        mMeta->h2o_lossless_decompressed_bytes = mH2OState->globalLastLosslessDecompressedBytes;
+        mMeta->h2o_lossless_compress_us = mH2OState->globalLastLosslessCompressUs;
+        mMeta->h2o_lossless_decompress_us = mH2OState->globalLastLosslessDecompressUs;
+        mMeta->h2o_lossless_queue_depth_peak = mH2OState->globalLosslessQueueDepthPeak;
+        mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
     }
 
     backend()->onReleaseBuffer(unpackQK.get(), Backend::STATIC);
