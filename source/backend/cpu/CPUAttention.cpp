@@ -721,8 +721,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     int kvValidOffset = kvSeqLen - seqLen; // reuse_kv=true or decode, kvValidOffset>0
 
     const int layerCount = (mMeta != nullptr) ? ALIMAX(1, mMeta->layer_nums) : 1;
-    if (mH2OState != nullptr && (int)mH2OState->layerStates.size() != layerCount) {
-        mH2OState->layerStates.clear();
+    if (mH2OState != nullptr && (int)mH2OState->layerStates.size() < layerCount) {
+        // Keep existing per-layer stats when a transient op reports smaller layer_count.
+        // Only grow capacity; never shrink during an active run.
         mH2OState->layerStates.resize(layerCount);
     }
     int layerIndex = 0;
