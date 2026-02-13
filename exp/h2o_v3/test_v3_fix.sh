@@ -17,6 +17,7 @@ MODEL_CONFIG="/home10T/ljq/mnn_data/models/llama2_mnn/config.json"
 LLM_BENCH="./build/llm_bench"
 DUMP_DIR="/home10T/ljq/MNN/exp/gear_fp16/dumps_fp16"
 OUT="exp/h2o_v3/out_runtime_probe_fix_$(date +%Y%m%d_%H%M%S)"
+BENCH_STDOUT_LOG="${OUT}/bench_stdout.log"
 
 # ── Tunables ───────────────────────────────────────────────────────────────
 PROMPTS="512,1024"
@@ -302,9 +303,11 @@ PY
 # ── Step 2: Actual benchmark run ──────────────────────────────────────────
 echo ""
 echo "==== Step 2: Running llm_bench ===="
-rm -rf "${OUT}/configs" "${OUT}/logs" "${OUT}/manifest.json"
+rm -rf "${OUT}/configs" "${OUT}/logs" "${OUT}/manifest.json" "${BENCH_STDOUT_LOG}"
 
-python3 exp/h2o_v3/run_h2o_v3_bench.py "${BENCH_ARGS[@]}"
+# Keep a full stdout/stderr transcript because [H2O-LOSSLESS] logs may not be
+# written into per-run markdown files produced by llm_bench -fp.
+python3 exp/h2o_v3/run_h2o_v3_bench.py "${BENCH_ARGS[@]}" 2>&1 | tee "${BENCH_STDOUT_LOG}"
 
 # ── Step 3: Parse logs ────────────────────────────────────────────────────
 echo ""
@@ -346,11 +349,25 @@ print('  PASS')
 # ── Step 5: Validate Fix 6 — groupedStep uses blockStep ──────────────────
 echo ""
 echo "==== Step 5: Validating Fix 6 — groupedStep ===="
-set +e
-LOSSLESS_LINES=$(grep -rh '\[H2O-LOSSLESS\]' "${OUT}/logs"/ 2>/dev/null)
-set -e
+LOSSLESS_LINES=""
+if [[ -d "${OUT}/logs" ]]; then
+  LOG_LINES=$(grep -rh '\[H2O-LOSSLESS\]' "${OUT}/logs" 2>/dev/null || true)
+  if [[ -n "${LOG_LINES}" ]]; then
+    LOSSLESS_LINES="${LOG_LINES}"
+  fi
+fi
+if [[ -f "${BENCH_STDOUT_LOG}" ]]; then
+  STDOUT_LINES=$(grep -h '\[H2O-LOSSLESS\]' "${BENCH_STDOUT_LOG}" 2>/dev/null || true)
+  if [[ -n "${STDOUT_LINES}" ]]; then
+    if [[ -n "${LOSSLESS_LINES}" ]]; then
+      LOSSLESS_LINES+=$'\n'
+    fi
+    LOSSLESS_LINES+="${STDOUT_LINES}"
+  fi
+fi
 if [[ -z "${LOSSLESS_LINES}" ]]; then
   echo "  FAIL: no [H2O-LOSSLESS] lines found — runtime lossless did not trigger"
+  echo "  Checked: ${OUT}/logs and ${BENCH_STDOUT_LOG}"
   exit 1
 fi
 echo "  Sample lines:"
