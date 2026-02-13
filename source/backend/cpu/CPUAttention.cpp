@@ -667,6 +667,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mH2OState->globalTokenStep = 0;
         mH2OState->globalLastTriggerStep = 0;
         mH2OState->globalLastLosslessStep = 0;
+        mH2OState->globalLastLosslessTokenBudget = 0;
         mH2OState->globalLastLosslessRatio = 1.0f;
         mH2OState->globalLastLosslessCodecUs = 0;
         mH2OState->globalLastLosslessRawBytes = 0;
@@ -1450,9 +1451,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         if (applyLossless) {
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
+            const int blockStep = ALIMAX(1, mMeta->h2o_lossless_block_tokens);
             const int64_t losslessStep = mH2OState->globalTokenStep;
+            const int tokenBudgetGrowth = losslessTokenBudget - mH2OState->globalLastLosslessTokenBudget;
             const bool shouldUpdateLossless = kvSeqLen >= triggerMin
-                && (losslessStep - mH2OState->globalLastLosslessStep >= updateInterval);
+                && (losslessStep - mH2OState->globalLastLosslessStep >= updateInterval)
+                && (tokenBudgetGrowth >= blockStep);
             if (shouldUpdateLossless || mH2OState->globalLastLosslessRatio <= 1.0f) {
                 auto c0 = std::chrono::high_resolution_clock::now();
                 const auto stats = estimateLosslessRuntimeStats(losslessTokenBudget);
@@ -1466,6 +1470,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessCompressUs = mH2OState->globalLastLosslessCodecUs;
                 mH2OState->globalLastLosslessDecompressUs = 0;
                 mH2OState->globalLastLosslessStep = losslessStep;
+                mH2OState->globalLastLosslessTokenBudget = losslessTokenBudget;
                 if (stats.fallbackUsed) {
                     mH2OState->globalLosslessFallbackCount += 1;
                     if (mMeta->h2o_log_stats != 0) {

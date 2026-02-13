@@ -41,6 +41,7 @@ private:
         int64_t globalTokenStep = 0;
         int64_t globalLastTriggerStep = 0;
         int64_t globalLastLosslessStep = 0;
+        int globalLastLosslessTokenBudget = 0;
         float globalLastLosslessRatio = 1.0f;
         int64_t globalLastLosslessCodecUs = 0;
         uint64_t globalLastLosslessRawBytes = 0;
