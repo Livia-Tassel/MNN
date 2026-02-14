@@ -507,25 +507,76 @@ fi
 echo "  Sample lines:"
 echo "${LOSSLESS_LINES}" | head -3
 
-TOKENS_192=$(echo "${LOSSLESS_LINES}" | grep -Ec "tokens=192([^0-9]|$)" || true)
-TOKENS_BLOCK=$(echo "${LOSSLESS_LINES}" | grep -Ec "tokens=${KV_LOSSLESS_BLOCK_TOKENS}([^0-9]|$)" || true)
-NON_BOOTSTRAP=$(echo "${LOSSLESS_LINES}" | grep -Ec "start=[1-9][0-9]*" || true)
-echo "  tokens=${KV_LOSSLESS_BLOCK_TOKENS} count: ${TOKENS_BLOCK}"
-echo "  tokens=192 count: ${TOKENS_192}"
-if [[ ${TOKENS_192} -gt 0 ]]; then
-  echo "  FAIL: hardcoded 192 grouping still present"
+set +e
+STEP5_OUT=$(LOSSLESS_LINES="${LOSSLESS_LINES}" python3 - "${KV_LOSSLESS_BLOCK_TOKENS}" <<'PY'
+import os
+import re
+import sys
+
+block_tokens = int(sys.argv[1])
+lines = [
+    ln.strip()
+    for ln in os.environ.get("LOSSLESS_LINES", "").splitlines()
+    if "[H2O-LOSSLESS]" in ln
+]
+
+tok_re = re.compile(r"\btokens=(\d+)\b")
+upd_re = re.compile(r"\bupdates=(\d+)\b")
+start_re = re.compile(r"\bstart=(\d+)\b")
+
+tok_192 = 0
+tok_block = 0
+periodic = 0
+bootstrap_like = 0
+start_pos = 0
+
+for ln in lines:
+    m_tok = tok_re.search(ln)
+    m_upd = upd_re.search(ln)
+    m_start = start_re.search(ln)
+    tok = int(m_tok.group(1)) if m_tok else -1
+    upd = int(m_upd.group(1)) if m_upd else -1
+    start = int(m_start.group(1)) if m_start else -1
+    if tok == 192:
+        tok_192 += 1
+    if tok == block_tokens:
+        tok_block += 1
+    if upd >= 2:
+        periodic += 1
+    elif upd == 1:
+        bootstrap_like += 1
+    if start > 0:
+        start_pos += 1
+
+print(f"  tokens={block_tokens} count: {tok_block}")
+print(f"  tokens=192 count: {tok_192}")
+print(f"  periodic(updates>=2) count: {periodic}")
+print(f"  bootstrap-like(updates=1) count: {bootstrap_like}")
+print(f"  start>0 count: {start_pos}")
+
+if tok_192 > 0:
+    print("  FAIL: hardcoded 192 grouping still present")
+    sys.exit(1)
+if tok_block > 0:
+    print("  PASS")
+    sys.exit(0)
+if periodic > 0:
+    print(f"  FAIL: periodic updates detected but none used tokens={block_tokens}")
+    sys.exit(1)
+print("  INFO: only bootstrap-like updates observed (updates=1).")
+print("        With hot-window clipping, bootstrap start may be >0 (e.g. start=hot_sink).")
+print("        This run did not reach periodic grouped updates; skipping strict blockStep assertion.")
+print("        To force strict check, increase GENS or reduce kv_lossless_block_tokens.")
+print("  PASS")
+sys.exit(0)
+PY
+)
+STEP5_RC=$?
+set -e
+echo "${STEP5_OUT}"
+if [[ ${STEP5_RC} -ne 0 ]]; then
   exit 1
 fi
-if [[ ${TOKENS_BLOCK} -eq 0 ]]; then
-  if [[ ${NON_BOOTSTRAP} -gt 0 ]]; then
-    echo "  FAIL: saw non-bootstrap updates (start>0) but none used tokens=${KV_LOSSLESS_BLOCK_TOKENS}"
-    exit 1
-  fi
-  echo "  INFO: only bootstrap updates observed (start=0, e.g. tokens=kv budget)."
-  echo "        This run did not reach periodic grouped updates; skipping strict blockStep assertion."
-  echo "        To force strict check, increase GENS or reduce kv_lossless_block_tokens."
-fi
-echo "  PASS"
 
 # ── Step 6: Offline lossless + Fix 2 regression ──────────────────────────
 echo ""
