@@ -1770,8 +1770,11 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
 
             stats.rawBytes = rawFullBytes;
-            const uint64_t keyHash = fnv1a64(keyMerged.data(), keyMerged.size());
-            stats.rawHash = fnv1a64(valueMerged.data(), valueMerged.size(), keyHash);
+            const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
+            if (strictRoundtrip) {
+                const uint64_t keyHash = fnv1a64(keyMerged.data(), keyMerged.size());
+                stats.rawHash = fnv1a64(valueMerged.data(), valueMerged.size(), keyHash);
+            }
 
             auto c0 = std::chrono::high_resolution_clock::now();
             bool keyOk = false;
@@ -1880,11 +1883,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     layerState.losslessFallbackCount += 1;
                     return;
                 }
-                uint64_t decodedHash = fnv1a64(keyDecoded.data(), keyDecoded.size());
-                decodedHash = fnv1a64(valueDecoded.data(), valueDecoded.size(), decodedHash);
-                if (mMeta->h2o_lossless_strict_roundtrip_check != 0 && decodedHash != block.rawHash) {
-                    layerState.losslessFallbackCount += 1;
-                    return;
+                if (mMeta->h2o_lossless_strict_roundtrip_check != 0) {
+                    uint64_t decodedHash = fnv1a64(keyDecoded.data(), keyDecoded.size());
+                    decodedHash = fnv1a64(valueDecoded.data(), valueDecoded.size(), decodedHash);
+                    if (decodedHash != block.rawHash) {
+                        layerState.losslessFallbackCount += 1;
+                        return;
+                    }
                 }
                 layerState.losslessDecompressedBytes += decodedBytes;
                 return;
@@ -1906,10 +1911,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         }
         if (applyLossless && layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
             auto& layerState = mH2OState->layerStates[layerIndex];
-            // Consume one pending decode first so a later budget-shrink clear does not
-            // silently drop an undecoded block.
-            decodeOnePendingLosslessBlock(layerState);
             if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
+                // Consume one pending decode before a shrink-triggered clear so we do
+                // not silently drop undecoded runtime blocks.
+                decodeOnePendingLosslessBlock(layerState);
                 // Budget shrank (H2O eviction compacted this layer's KV cache).
                 // Reset the token-budget watermark so delta tracking works going
                 // forward, but preserve the accumulated byte/ratio stats — they
@@ -1941,19 +1946,24 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);
 
             int evalTokenCount = 0;
+            int evalStartToken = layerState.losslessLastTokenBudget;
+            bool bootstrapWindowSampled = false;
             if (kvSeqLen >= triggerMin) {
                 if (layerState.losslessUpdateCount <= 0) {
-                    // Bootstrap once as soon as budget is large enough.
+                    // Bootstrap with one fixed-size window to cap startup overhead.
+                    // Then align watermark to current budget to avoid catch-up bursts.
                     if (tokenBudgetGrowth >= blockStep) {
-                        evalTokenCount = tokenBudgetGrowth;
+                        evalTokenCount = blockStep;
+                        evalStartToken = ALIMAX(0, losslessTokenBudget - blockStep);
+                        bootstrapWindowSampled = true;
                     }
                 } else if (intervalReady && tokenBudgetGrowth >= groupedStep) {
                     evalTokenCount = groupedStep;
+                    evalStartToken = layerState.losslessLastTokenBudget;
                 }
             }
 
             if (evalTokenCount > 0) {
-                const int evalStartToken = layerState.losslessLastTokenBudget;
                 auto stats = encodeLosslessRuntimeStats(evalStartToken, evalTokenCount);
                 if (!stats.fallbackUsed) {
                     const int maxQueue = ALIMAX(1, mMeta->h2o_lossless_max_queue);
@@ -2010,7 +2020,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 layerState.losslessDecompressUs += stats.decompressUs;
                 layerState.losslessFallbackCount += stats.fallbackUsed ? 1 : 0;
                 layerState.losslessUpdateCount += 1;
-                layerState.losslessLastTokenBudget = evalStartToken + evalTokenCount;
+                layerState.losslessLastTokenBudget = bootstrapWindowSampled
+                    ? losslessTokenBudget
+                    : (evalStartToken + evalTokenCount);
                 layerState.losslessLastStep = losslessStep;
 
                 mH2OState->globalLastLosslessCodecUs = stats.compressUs;
