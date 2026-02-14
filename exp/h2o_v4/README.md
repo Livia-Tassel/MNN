@@ -4,16 +4,17 @@ This folder is the v4 experiment kit for the M1 milestone:
 - runtime lossy H2O target: `>= 3.0`
 - runtime lossless path upgraded from size-estimation to real encode/decode accounting
 - offline lossless deployment gate remains: `online_sim >= 1.3`
+- runtime lossless scope now supports `front_n + h2o_kept` joint mode
 
 ## Latest Validated Run
+- Full output: `exp/h2o_v4/out_runtime_v4_20260214_212611`
+  - `quality_status: PASS`
+  - `runtime_decomp_best_us: 6920.3300`
+  - `decode_best: 6.7500` vs baseline `6.6000`
 - Probe output: `exp/h2o_v4/out_runtime_v4_20260214_182357`
   - `quality_status: PASS`
   - `runtime_decomp_best_us: 589.6700`
   - `decode_best: 6.9700` vs baseline `6.6000`
-- Full output: `exp/h2o_v4/out_runtime_v4_20260214_200411`
-  - `quality_status: PASS`
-  - `runtime_decomp_best_us: 6246.3300`
-  - `decode_best: 6.7000` vs baseline `6.6000`
 
 ## Scripts
 - `run_h2o_v4_bench.py`: generate configs + run `llm_bench`
@@ -50,6 +51,7 @@ python3 exp/h2o_v4/sweep_h2o_v4.py \
   --out-dir exp/h2o_v4/out_tune_v4_$(date +%Y%m%d_%H%M%S)
 ```
 For store-mode experiments, use `--preset exp/h2o_v4/configs/target_store_v4.json`.
+For joint-scope experiments (`front_n + h2o_kept`), use `--preset exp/h2o_v4/configs/target_joint_scope_v4.json`.
 
 ## Parse + Analyze
 ```bash
@@ -99,6 +101,13 @@ bash exp/h2o_v4/run_full_eval.sh \
   - `store` (experimental): compress then drop selected raw KV slices and restore on next decode step before use.
 - `test_v4_runtime.sh` and v4 presets default to `probe`.
 
+## Lossless Scope Knob (New)
+- Config key: `kv_lossless_scope`
+- Values:
+  - `front_n`: apply runtime lossless to first `kv_lossless_front_n` layers.
+  - `h2o_kept`: apply runtime lossless to H2O active layer range and its kept budget.
+  - `front_n_and_h2o_kept` (or `front_n+h2o_kept`): apply both together.
+
 ## Scope Boundary
 - M1 done:
   - Real runtime encode blob generation + runtime decode timing/accounting path.
@@ -116,6 +125,12 @@ bash exp/h2o_v4/run_full_eval.sh \
 - You can switch runtime sampling mode without editing the script:
 ```bash
 KV_LOSSLESS_RUNTIME_MODE=full bash exp/h2o_v4/test_v4_runtime.sh
+```
+Joint-scope path toward final target:
+```bash
+KV_LOSSLESS_SCOPE=front_n_and_h2o_kept \
+KV_LOSSLESS_RUNTIME_MODE=full \
+bash exp/h2o_v4/test_v4_runtime.sh
 ```
 Store mode:
 ```bash

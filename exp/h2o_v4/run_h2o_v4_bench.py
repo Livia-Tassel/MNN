@@ -72,7 +72,11 @@ def main():
     parser.add_argument("--h2o-target-lossy-ratios", default="3.0")
     parser.add_argument("--h2o-log-stats", action="store_true")
     parser.add_argument("--kv-lossless-enable", action="store_true")
-    parser.add_argument("--kv-lossless-scope", default="front_n", choices=["none", "front_n", "h2o_kept"])
+    parser.add_argument(
+        "--kv-lossless-scope",
+        default="front_n",
+        choices=["none", "front_n", "h2o_kept", "front_n_and_h2o_kept", "front_n+h2o_kept"],
+    )
     parser.add_argument("--kv-lossless-front-n", type=int, default=2)
     parser.add_argument("--kv-lossless-codec", default="none", choices=["none", "gear_delta"])
     parser.add_argument("--kv-lossless-runtime-enable", action="store_true")

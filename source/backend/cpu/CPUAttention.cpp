@@ -1233,8 +1233,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         auto& restoreState = mH2OState->layerStates[preLayerIndex];
         const int flashBlockKv = ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv());
         const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
-        for (auto& block : restoreState.losslessBlocks) {
+        for (auto it = restoreState.losslessBlocks.begin(); it != restoreState.losslessBlocks.end();) {
+            auto& block = *it;
             if (!block.rawDropped) {
+                // Store mode only needs compressed payload until first successful restore.
+                // Drop stale restored blocks to cap long-run memory usage.
+                it = restoreState.losslessBlocks.erase(it);
                 continue;
             }
             uint64_t decodedBytes = 0;
@@ -1264,7 +1268,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             } else if (fallbackUsed) {
                 restoreState.losslessFallbackCount += 1;
             }
-            block.rawDropped = false;
+            // Once restored (or failed irrecoverably), payload is no longer useful.
+            it = restoreState.losslessBlocks.erase(it);
         }
     }
 
@@ -2197,12 +2202,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         if (mMeta->h2o_lossless_enable != 0
             && mMeta->h2o_lossless_codec == 1
             && mMeta->h2o_lossless_runtime_enable != 0) {
+            const bool inFrontLosslessRange = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
+            const bool inH2OKeptLosslessRange = h2oLayerInRange;
             if (mMeta->h2o_lossless_scope == 1) { // front_n
-                applyLossless = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
+                applyLossless = inFrontLosslessRange;
                 losslessTokenBudget = kvSeqLen;
             } else if (mMeta->h2o_lossless_scope == 2) { // h2o_kept
-                applyLossless = h2oLayerInRange;
+                applyLossless = inH2OKeptLosslessRange;
                 losslessTokenBudget = finalKeepTokensForLayer;
+            } else if (mMeta->h2o_lossless_scope == 3) { // front_n_and_h2o_kept
+                applyLossless = inFrontLosslessRange || inH2OKeptLosslessRange;
+                // Prefer full front-layer budget; for deeper H2O-kept layers use post-lossy keep budget.
+                losslessTokenBudget = inFrontLosslessRange ? kvSeqLen : finalKeepTokensForLayer;
             }
         }
         if (applyLossless && mMeta->h2o_lossless_runtime_enable != 0 && runtimeProbeMode) {
@@ -2212,10 +2223,24 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 applyLossless = (layerIndex == 0);
             } else if (mMeta->h2o_lossless_scope == 2) { // h2o_kept
                 applyLossless = (layerIndex == h2oLayerStart);
+            } else if (mMeta->h2o_lossless_scope == 3) { // front_n_and_h2o_kept
+                const bool sampleFront = (layerIndex == 0);
+                const bool sampleKept = (layerIndex == h2oLayerStart);
+                applyLossless = sampleFront || sampleKept;
             }
         }
         if (applyLossless && layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
             auto& layerState = mH2OState->layerStates[layerIndex];
+            auto countPendingBlocks = [&](const CPUAttention::H2OSharedState::LayerState& state) -> int64_t {
+                int64_t pending = 0;
+                for (const auto& block : state.losslessBlocks) {
+                    const bool pendingBlock = runtimeStoreModeLocal ? block.rawDropped : !block.decodedOnce;
+                    if (pendingBlock) {
+                        pending += 1;
+                    }
+                }
+                return pending;
+            };
             if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
                 // Consume one pending decode before a shrink-triggered clear so we do
                 // not silently drop undecoded runtime blocks.
@@ -2233,12 +2258,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 layerState.losslessBlocks.clear();
             }
 
-            int64_t pendingQueueDepth = 0;
-            for (const auto& block : layerState.losslessBlocks) {
-                if (!block.decodedOnce) {
-                    pendingQueueDepth += 1;
-                }
-            }
+            const int64_t pendingQueueDepth = countPendingBlocks(layerState);
             mH2OState->globalLosslessQueueDepthPeak =
                 ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingQueueDepth);
 
@@ -2275,12 +2295,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 auto stats = encodeLosslessRuntimeStats(evalStartToken, evalTokenCount);
                 if (!stats.fallbackUsed) {
                     const int maxQueue = ALIMAX(1, mMeta->h2o_lossless_max_queue);
-                    int pending = 0;
-                    for (const auto& block : layerState.losslessBlocks) {
-                        if (!block.decodedOnce) {
-                            pending += 1;
-                        }
-                    }
+                    const int64_t pending = countPendingBlocks(layerState);
                     if (pending >= maxQueue) {
                         stats.fallbackUsed = true;
                         stats.backpressureSkipped = true;
@@ -2309,12 +2324,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             layerState.losslessBlocks.erase(layerState.losslessBlocks.begin());
                         }
                     }
-                    int64_t pendingAfterPush = 0;
-                    for (const auto& b : layerState.losslessBlocks) {
-                        if (!b.decodedOnce) {
-                            pendingAfterPush += 1;
-                        }
-                    }
+                    const int64_t pendingAfterPush = countPendingBlocks(layerState);
                     mH2OState->globalLosslessQueueDepthPeak =
                         ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterPush);
                     if (runtimeStoreModeLocal && !layerState.losslessBlocks.empty()) {
@@ -2368,12 +2378,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
                 if (mMeta->h2o_log_stats != 0) {
                     const bool zstdReady = getZstdApi().available;
-                    int pendingAfterUpdate = 0;
-                    for (const auto& block : layerState.losslessBlocks) {
-                        if (!block.decodedOnce) {
-                            pendingAfterUpdate += 1;
-                        }
-                    }
+                    const int64_t pendingAfterUpdate = countPendingBlocks(layerState);
                     MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d mode=%d zstd=%d\n",
                               layerIndex,
                               kvSeqLen,
@@ -2389,7 +2394,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                               (long long)layerState.losslessUpdateCount,
                               stats.fallbackUsed ? 1 : 0,
                               stats.backpressureSkipped ? 1 : 0,
-                              pendingAfterUpdate,
+                              (int)pendingAfterUpdate,
                               runtimeMode,
                               zstdReady ? 1 : 0);
                 }
@@ -2411,6 +2416,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 include = (i < frontN);
             } else if (losslessScope == 2) { // h2o_kept range
                 include = (i >= h2oLayerStart && i <= h2oLayerEnd);
+            } else if (losslessScope == 3) { // front_n_and_h2o_kept
+                include = (i < frontN) || (i >= h2oLayerStart && i <= h2oLayerEnd);
             }
             if (!include) {
                 continue;

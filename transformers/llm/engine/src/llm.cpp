@@ -86,6 +86,8 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     const auto scope = cfg->kv_lossless_scope();
     if (scope == "none") {
         meta->h2o_lossless_scope = 0;
+    } else if (scope == "front_n_and_h2o_kept" || scope == "front_n+h2o_kept") {
+        meta->h2o_lossless_scope = 3;
     } else if (scope == "h2o_kept") {
         meta->h2o_lossless_scope = 2;
     } else {
