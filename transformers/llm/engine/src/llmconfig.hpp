@@ -516,6 +516,12 @@ public:
     int kv_lossless_hot_sink_tokens() const {
         return config_.value("kv_lossless_hot_sink_tokens", 16);
     }
+    int kv_lossless_kept_sample_layers() const {
+        return config_.value("kv_lossless_kept_sample_layers", 1);
+    }
+    int kv_lossless_kept_sample_token_interval() const {
+        return config_.value("kv_lossless_kept_sample_token_interval", 1);
+    }
     std::string kv_lossless_codec_runtime() const {
         return config_.value("kv_lossless_codec_runtime", "fp16_gear_predictive_v3");
     }

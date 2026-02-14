@@ -67,6 +67,18 @@ def main():
     parser.add_argument("--decode-baseline", type=float, default=0.0, help="Baseline decode TPS for regression gate.")
     parser.add_argument("--decode-drop-target", type=float, default=0.05, help="Max allowed decode TPS drop ratio.")
     parser.add_argument(
+        "--max-lossless-queue-peak",
+        type=float,
+        default=-1.0,
+        help="Optional gate: require runtime queue peak <= target (negative disables).",
+    )
+    parser.add_argument(
+        "--max-lossless-fallback",
+        type=float,
+        default=-1.0,
+        help="Optional gate: require runtime fallback count <= target (negative disables).",
+    )
+    parser.add_argument(
         "--require-runtime-decomp",
         action="store_true",
         help="Require runtime h2o_lossless_decomp_us > 0 for at least one row.",
@@ -89,6 +101,7 @@ def main():
             row["_h2o_lossless_comp_mb"] = parse_float(row.get("h2o_lossless_comp_mb", "0"))
             row["_h2o_lossless_comp_us"] = parse_float(row.get("h2o_lossless_comp_us", "0"))
             row["_h2o_lossless_decomp_us"] = parse_float(row.get("h2o_lossless_decomp_us", "0"))
+            row["_h2o_lossless_queue_peak"] = parse_float(row.get("h2o_lossless_queue_peak", "0"))
             row["_h2o_lossless_fallback"] = parse_float(row.get("h2o_lossless_fallback", "0"))
             row["_decode_tps"] = parse_decode_speed(row.get("speed(tok/s)", ""))
             rows.append(row)
@@ -108,6 +121,7 @@ def main():
     avg_lossless_comp_mb = sum(r["_h2o_lossless_comp_mb"] for r in rows) / len(rows)
     avg_lossless_comp_us = sum(r["_h2o_lossless_comp_us"] for r in rows) / len(rows)
     avg_lossless_decomp_us = sum(r["_h2o_lossless_decomp_us"] for r in rows) / len(rows)
+    avg_lossless_queue_peak = sum(r["_h2o_lossless_queue_peak"] for r in rows) / len(rows)
     avg_lossless_fallback = sum(r["_h2o_lossless_fallback"] for r in rows) / len(rows)
 
     upper_lossless = 0.0
@@ -151,13 +165,34 @@ def main():
     online_gate_lossless = online_lossless if online_lossless > 0.0 else selected_lossless
     online_lossless_pass = online_gate_lossless >= args.lossless_target
     runtime_decomp_best = max(r["_h2o_lossless_decomp_us"] for r in rows)
+    runtime_queue_peak_best = max(r["_h2o_lossless_queue_peak"] for r in rows)
+    runtime_fallback_best = max(r["_h2o_lossless_fallback"] for r in rows)
     runtime_decomp_pass = (runtime_decomp_best > 0.0) if args.require_runtime_decomp else True
+    queue_peak_gate_enabled = args.max_lossless_queue_peak >= 0.0
+    fallback_gate_enabled = args.max_lossless_fallback >= 0.0
+    runtime_queue_peak_pass = (
+        runtime_queue_peak_best <= args.max_lossless_queue_peak
+        if queue_peak_gate_enabled
+        else True
+    )
+    runtime_fallback_pass = (
+        runtime_fallback_best <= args.max_lossless_fallback
+        if fallback_gate_enabled
+        else True
+    )
     decode_drop_ratio = 0.0
     decode_pass = True
     if args.decode_baseline > 0.0:
         decode_drop_ratio = (args.decode_baseline - best_decode["_decode_tps"]) / args.decode_baseline
         decode_pass = decode_drop_ratio <= args.decode_drop_target
-    overall_pass = lossy_pass and online_lossless_pass and decode_pass and runtime_decomp_pass
+    overall_pass = (
+        lossy_pass
+        and online_lossless_pass
+        and decode_pass
+        and runtime_decomp_pass
+        and runtime_queue_peak_pass
+        and runtime_fallback_pass
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +218,7 @@ def main():
         f.write(f"- Avg lossless comp MB: {avg_lossless_comp_mb:.4f}\n")
         f.write(f"- Avg lossless comp us: {avg_lossless_comp_us:.2f}\n")
         f.write(f"- Avg lossless decomp us: {avg_lossless_decomp_us:.2f}\n")
+        f.write(f"- Avg lossless queue peak: {avg_lossless_queue_peak:.2f}\n")
         f.write(f"- Avg lossless fallback: {avg_lossless_fallback:.2f}\n\n")
 
         f.write("## Best Lossy Ratio\n\n")
@@ -232,6 +268,16 @@ def main():
         f.write(f"- lossless_online_pass: {format_gate_bool(online_lossless_pass)}\n")
         f.write(f"- runtime_decomp_required: {format_gate_bool(args.require_runtime_decomp)}\n")
         f.write(f"- runtime_decomp_best_us: {runtime_decomp_best:.4f}\n")
+        f.write(f"- runtime_queue_peak_best: {runtime_queue_peak_best:.4f}\n")
+        f.write(f"- runtime_fallback_best: {runtime_fallback_best:.4f}\n")
+        f.write(f"- runtime_queue_peak_gate_enabled: {format_gate_bool(queue_peak_gate_enabled)}\n")
+        if queue_peak_gate_enabled:
+            f.write(f"- runtime_queue_peak_target: {args.max_lossless_queue_peak:.4f}\n")
+        f.write(f"- runtime_queue_peak_pass: {format_gate_bool(runtime_queue_peak_pass)}\n")
+        f.write(f"- runtime_fallback_gate_enabled: {format_gate_bool(fallback_gate_enabled)}\n")
+        if fallback_gate_enabled:
+            f.write(f"- runtime_fallback_target: {args.max_lossless_fallback:.4f}\n")
+        f.write(f"- runtime_fallback_pass: {format_gate_bool(runtime_fallback_pass)}\n")
         f.write(f"- runtime_decomp_pass: {format_gate_bool(runtime_decomp_pass)}\n")
         f.write(f"- overall_pass: {format_gate_bool(overall_pass)}\n")
         if args.decode_baseline > 0.0:

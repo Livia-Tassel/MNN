@@ -45,6 +45,8 @@ KV_LOSSLESS_CODEC="gear_delta"
 KV_LOSSLESS_BLOCK_TOKENS=128
 KV_LOSSLESS_HOT_RECENT=256
 KV_LOSSLESS_HOT_SINK=16
+KV_LOSSLESS_KEPT_SAMPLE_LAYERS="${KV_LOSSLESS_KEPT_SAMPLE_LAYERS:-1}"
+KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL="${KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL:-1}"
 KV_LOSSLESS_RUNTIME_MODE="${KV_LOSSLESS_RUNTIME_MODE:-probe}"
 KV_LOSSLESS_CODEC_RUNTIME="fp16_gear_predictive_v3"
 
@@ -53,6 +55,8 @@ LOSSY_TARGET=3.0
 LOSSLESS_TARGET=1.3
 DECODE_BASELINE=6.60
 DECODE_DROP_TARGET=0.05
+MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK:--1}"
+MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK:--1}"
 
 # Offline lossless
 ONLINE_CHUNK_SEQ=192
@@ -88,6 +92,15 @@ if [[ -z "${TMP_AVAIL_KB}" || "${TMP_AVAIL_KB}" -lt 65536 ]]; then
   exit 1
 fi
 echo "Temp workspace: ${TMPDIR} (avail ${TMP_AVAIL_KB} KiB)"
+echo "Runtime knobs:"
+echo "  KV_LOSSLESS_SCOPE=${KV_LOSSLESS_SCOPE}"
+echo "  KV_LOSSLESS_RUNTIME_MODE=${KV_LOSSLESS_RUNTIME_MODE}"
+echo "  KV_LOSSLESS_KEPT_SAMPLE_LAYERS=${KV_LOSSLESS_KEPT_SAMPLE_LAYERS}"
+echo "  KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL=${KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL}"
+echo "  KV_LOSSLESS_HOT_SINK=${KV_LOSSLESS_HOT_SINK}"
+echo "  KV_LOSSLESS_HOT_RECENT=${KV_LOSSLESS_HOT_RECENT}"
+echo "  MAX_LOSSLESS_QUEUE_PEAK=${MAX_LOSSLESS_QUEUE_PEAK}"
+echo "  MAX_LOSSLESS_FALLBACK=${MAX_LOSSLESS_FALLBACK}"
 
 # ── Step 0: Quick Python-side regression checks ───────────────────────────
 echo ""
@@ -291,6 +304,8 @@ BENCH_ARGS=(
   --kv-lossless-block-tokens "${KV_LOSSLESS_BLOCK_TOKENS}"
   --kv-lossless-hot-recent-tokens "${KV_LOSSLESS_HOT_RECENT}"
   --kv-lossless-hot-sink-tokens "${KV_LOSSLESS_HOT_SINK}"
+  --kv-lossless-kept-sample-layers "${KV_LOSSLESS_KEPT_SAMPLE_LAYERS}"
+  --kv-lossless-kept-sample-token-interval "${KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL}"
 )
 
 # ── Step 1: Dry-run config generation ─────────────────────────────────────
@@ -401,10 +416,12 @@ for i, r in enumerate(rows, 1):
     comp = parse_mean(r.get("h2o_lossless_comp_mb", "0"))
     comp_us = parse_mean(r.get("h2o_lossless_comp_us", "0"))
     decomp_us = parse_mean(r.get("h2o_lossless_decomp_us", "0"))
+    queue_peak = parse_mean(r.get("h2o_lossless_queue_peak", "0"))
     row_ok = raw > 0 and comp > 0 and comp_us > 0 and decomp_us > 0
     print(
         f"  row#{i}: raw_mb={raw:.3f} comp_mb={comp:.3f} "
-        f"comp_us={comp_us:.2f} decomp_us={decomp_us:.2f} -> {'OK' if row_ok else 'FAIL'}"
+        f"comp_us={comp_us:.2f} decomp_us={decomp_us:.2f} queue_peak={queue_peak:.2f} "
+        f"-> {'OK' if row_ok else 'FAIL'}"
     )
     if row_ok:
         ok += 1
@@ -599,6 +616,8 @@ python3 exp/h2o_v4/analyze_h2o_v4.py \
   --lossy-target "${LOSSY_TARGET}" \
   --lossless-target "${LOSSLESS_TARGET}" \
   --require-runtime-decomp \
+  --max-lossless-queue-peak "${MAX_LOSSLESS_QUEUE_PEAK}" \
+  --max-lossless-fallback "${MAX_LOSSLESS_FALLBACK}" \
   --decode-baseline "${DECODE_BASELINE}" \
   --decode-drop-target "${DECODE_DROP_TARGET}" \
   --out "${OUT}/summary.md"

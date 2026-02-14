@@ -24,7 +24,7 @@
   "kv_lossless_hot_recent_tokens": 256,
   "kv_lossless_hot_sink_tokens": 16,
   "kv_lossless_kept_sample_layers": 1,
-  "kv_lossless_kept_sample_token_interval": 1,
+  "kv_lossless_kept_sample_token_interval": 2,
   "kv_lossless_codec_runtime": "fp16_gear_predictive_v3",
   "kv_lossless_predictors_k": "raw,delta_seq,xor_seq,pair_delta",
   "kv_lossless_predictors_v": "raw,delta_seq,xor_seq",

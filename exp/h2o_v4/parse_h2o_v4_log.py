@@ -82,6 +82,7 @@ def main():
         "h2o_lossless_comp_mb",
         "h2o_lossless_comp_us",
         "h2o_lossless_decomp_us",
+        "h2o_lossless_queue_peak",
         "h2o_lossless_fallback",
         "log_file",
     ]

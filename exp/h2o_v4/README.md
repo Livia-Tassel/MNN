@@ -52,6 +52,7 @@ python3 exp/h2o_v4/sweep_h2o_v4.py \
 ```
 For store-mode experiments, use `--preset exp/h2o_v4/configs/target_store_v4.json`.
 For joint-scope experiments (`front_n + h2o_kept`), use `--preset exp/h2o_v4/configs/target_joint_scope_v4.json`.
+For lower-overhead joint-scope full runs, use `--preset exp/h2o_v4/configs/target_joint_scope_v4_balanced.json`.
 
 ## Parse + Analyze
 ```bash
@@ -91,7 +92,10 @@ bash exp/h2o_v4/run_full_eval.sh \
 - `lossless_online_pass`: offline online-sim lossless `>= 1.3`
 - `decode_pass`: best decode tps drop ratio `<= 0.05`
 - `runtime_decomp_pass`: runtime `h2o_lossless_decomp_us > 0` (when `--require-runtime-decomp` is enabled)
-- `overall_pass = lossy_pass && lossless_online_pass && decode_pass && runtime_decomp_pass`
+- Optional:
+  - `runtime_queue_peak_pass`: when `--max-lossless-queue-peak >= 0`, require `queue_peak <= target`
+  - `runtime_fallback_pass`: when `--max-lossless-fallback >= 0`, require `fallback <= target`
+- `overall_pass = lossy_pass && lossless_online_pass && decode_pass && runtime_decomp_pass && runtime_queue_peak_pass && runtime_fallback_pass`
 
 ## Runtime Mode Knob (New)
 - Config key: `kv_lossless_runtime_mode`
@@ -110,6 +114,10 @@ bash exp/h2o_v4/run_full_eval.sh \
 - Runtime note:
   - In `full + front_n_and_h2o_kept`, deep kept layers use representative sampling (start layer)
     to prevent decode TPS regression while keeping online deep-layer signal.
+  - `kv_lossless_hot_sink_tokens` and `kv_lossless_hot_recent_tokens` are now enforced by runtime
+    cold-window selection (hot region is excluded from runtime lossless updates).
+  - `kv_lossless_kept_sample_layers`: number of kept-range layers sampled in full mode.
+  - `kv_lossless_kept_sample_token_interval`: sample deep kept range every N decode-token steps.
 
 ## Scope Boundary
 - M1 done:
@@ -133,6 +141,20 @@ Joint-scope path toward final target:
 ```bash
 KV_LOSSLESS_SCOPE=front_n_and_h2o_kept \
 KV_LOSSLESS_RUNTIME_MODE=full \
+bash exp/h2o_v4/test_v4_runtime.sh
+```
+Lower-overhead joint full:
+```bash
+KV_LOSSLESS_SCOPE=front_n_and_h2o_kept \
+KV_LOSSLESS_RUNTIME_MODE=full \
+KV_LOSSLESS_KEPT_SAMPLE_LAYERS=1 \
+KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL=2 \
+bash exp/h2o_v4/test_v4_runtime.sh
+```
+Enable strict runtime queue/fallback gates in one run:
+```bash
+MAX_LOSSLESS_QUEUE_PEAK=8 \
+MAX_LOSSLESS_FALLBACK=0 \
 bash exp/h2o_v4/test_v4_runtime.sh
 ```
 Store mode:

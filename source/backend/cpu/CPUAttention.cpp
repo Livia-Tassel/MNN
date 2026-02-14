@@ -2216,14 +2216,20 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 losslessTokenBudget = inFrontLosslessRange ? kvSeqLen : finalKeepTokensForLayer;
             }
         }
-        if (applyLossless && runtimeMode == 1 && mMeta->h2o_lossless_scope == 3) {
+        if (applyLossless && runtimeMode == 1
+            && (mMeta->h2o_lossless_scope == 2 || mMeta->h2o_lossless_scope == 3)) {
             const bool inFrontLosslessRange = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
             const bool inH2OKeptLosslessRange = h2oLayerInRange;
-            if (!inFrontLosslessRange && inH2OKeptLosslessRange) {
-                // Full-mode + joint scope is very expensive if all deep kept layers run runtime
-                // lossless on every decode token. Keep a representative kept-layer sample to
-                // protect decode TPS while preserving deep-layer online signal.
-                applyLossless = (layerIndex == h2oLayerStart);
+            if (inH2OKeptLosslessRange && !(mMeta->h2o_lossless_scope == 3 && inFrontLosslessRange)) {
+                const int keptSampleLayers = ALIMAX(1, mMeta->h2o_lossless_kept_sample_layers);
+                const int keptSampleTokenInterval = ALIMAX(1, mMeta->h2o_lossless_kept_sample_token_interval);
+                const int keptLayerOffset = layerIndex - h2oLayerStart;
+                const bool layerSampled = keptLayerOffset >= 0 && keptLayerOffset < keptSampleLayers;
+                const int64_t tokenStep = std::max<int64_t>(1, mH2OState->globalTokenStep);
+                const bool tokenSampled = ((tokenStep - 1) % (int64_t)keptSampleTokenInterval) == 0;
+                // Full-mode deep kept range can be tuned by kept-layer count and decode-step interval.
+                // This preserves front-layer signal while capping decode overhead in deep layers.
+                applyLossless = layerSampled && tokenSampled;
                 if (applyLossless) {
                     losslessTokenBudget = finalKeepTokensForLayer;
                 }
@@ -2254,20 +2260,20 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 }
                 return pending;
             };
-            if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
+            const int hotSinkTokens = ALIMAX(0, mMeta->h2o_lossless_hot_sink_tokens);
+            const int hotRecentTokens = ALIMAX(0, mMeta->h2o_lossless_hot_recent_tokens);
+            const int coldBeginToken = ALIMIN(losslessTokenBudget, hotSinkTokens);
+            const int coldEndToken = ALIMAX(coldBeginToken, losslessTokenBudget - hotRecentTokens);
+            const int coldTokenBudget = coldEndToken;
+            if (coldTokenBudget < layerState.losslessLastTokenBudget) {
                 // Consume one pending decode before a shrink-triggered clear so we do
                 // not silently drop undecoded runtime blocks.
                 decodeOnePendingLosslessBlock(layerState);
-                // Budget shrank (H2O eviction compacted this layer's KV cache).
-                // Reset the token-budget watermark so delta tracking works going
-                // forward, but preserve the accumulated byte/ratio stats — they
-                // remain a valid characterisation of this layer's compressibility
-                // and are needed by the aggregation path that feeds the bench
-                // summary.  A full wipe here would leave updateCount == 0, making
-                // the layer invisible to scope-filtered aggregation, and with
-                // kvSeqLen < triggerMin the bootstrap can never re-run.
+                // Compressible cold budget shrank (eviction or hot-window shift).
+                // Reset cold-window watermark so delta tracking works going forward,
+                // while preserving accumulated byte/ratio stats for aggregation.
                 layerState.losslessLastStep = 0;
-                layerState.losslessLastTokenBudget = losslessTokenBudget;
+                layerState.losslessLastTokenBudget = coldTokenBudget;
                 layerState.losslessBlocks.clear();
             }
 
@@ -2280,27 +2286,27 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int blockStep = ALIMAX(1, mMeta->h2o_lossless_block_tokens);
             const int groupedStep = blockStep;
             const int64_t losslessStep = mH2OState->globalTokenStep;
-            const int tokenBudgetGrowth = losslessTokenBudget - layerState.losslessLastTokenBudget;
+            const int tokenBudgetGrowth = coldTokenBudget - layerState.losslessLastTokenBudget;
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);
             const int runtimeBootstrapSampleCap = runtimeProbeMode ? 32 : blockStep;
             const int bootstrapSampleTokens = ALIMAX(1, ALIMIN(blockStep, runtimeBootstrapSampleCap));
 
             int evalTokenCount = 0;
-            int evalStartToken = layerState.losslessLastTokenBudget;
+            int evalStartToken = ALIMAX(layerState.losslessLastTokenBudget, coldBeginToken);
             bool bootstrapWindowSampled = false;
-            if (kvSeqLen >= triggerMin) {
+            if (kvSeqLen >= triggerMin && coldEndToken > coldBeginToken) {
                 if (layerState.losslessUpdateCount <= 0) {
                     // Probe mode uses a tiny prefix sample; full mode keeps full block.
                     if (tokenBudgetGrowth >= bootstrapSampleTokens) {
-                        evalTokenCount = bootstrapSampleTokens;
+                        evalTokenCount = ALIMIN(bootstrapSampleTokens, coldEndToken - coldBeginToken);
                         evalStartToken = runtimeProbeMode
-                            ? 0
-                            : ALIMAX(0, losslessTokenBudget - bootstrapSampleTokens);
+                            ? coldBeginToken
+                            : ALIMAX(coldBeginToken, coldEndToken - bootstrapSampleTokens);
                         bootstrapWindowSampled = true;
                     }
                 } else if (intervalReady && tokenBudgetGrowth >= groupedStep) {
-                    evalTokenCount = groupedStep;
-                    evalStartToken = layerState.losslessLastTokenBudget;
+                    evalStartToken = ALIMAX(layerState.losslessLastTokenBudget, coldBeginToken);
+                    evalTokenCount = ALIMIN(groupedStep, ALIMAX(0, coldEndToken - evalStartToken));
                 }
             }
 
@@ -2370,7 +2376,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 layerState.losslessFallbackCount += stats.fallbackUsed ? 1 : 0;
                 layerState.losslessUpdateCount += 1;
                 layerState.losslessLastTokenBudget = (runtimeProbeMode && bootstrapWindowSampled)
-                    ? losslessTokenBudget
+                    ? coldTokenBudget
                     : (evalStartToken + evalTokenCount);
                 layerState.losslessLastStep = losslessStep;
 
