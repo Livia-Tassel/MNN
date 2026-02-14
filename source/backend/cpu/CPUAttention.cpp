@@ -1869,6 +1869,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 }
                 auto d1 = std::chrono::high_resolution_clock::now();
                 const int64_t decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
+                // Count real decode work even if round-trip validation fails.
+                layerState.losslessDecompressUs += decodeUs;
                 if (!keyOk || !valueOk) {
                     layerState.losslessFallbackCount += 1;
                     return;
@@ -1884,7 +1886,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     layerState.losslessFallbackCount += 1;
                     return;
                 }
-                layerState.losslessDecompressUs += decodeUs;
                 layerState.losslessDecompressedBytes += decodedBytes;
                 return;
             }
@@ -1905,6 +1906,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         }
         if (applyLossless && layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
             auto& layerState = mH2OState->layerStates[layerIndex];
+            // Consume one pending decode first so a later budget-shrink clear does not
+            // silently drop an undecoded block.
+            decodeOnePendingLosslessBlock(layerState);
             if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
                 // Budget shrank (H2O eviction compacted this layer's KV cache).
                 // Reset the token-budget watermark so delta tracking works going
@@ -1919,7 +1923,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 layerState.losslessBlocks.clear();
             }
 
-            decodeOnePendingLosslessBlock(layerState);
             int64_t pendingQueueDepth = 0;
             for (const auto& block : layerState.losslessBlocks) {
                 if (!block.decodedOnce) {
@@ -1997,6 +2000,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     mH2OState->globalLosslessQueueDepthPeak =
                         ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterPush);
                 }
+                // Decode one block right after enqueue so single-update runs still
+                // report real runtime decompression cost.
+                decodeOnePendingLosslessBlock(layerState);
                 layerState.losslessRawBytes += stats.rawBytes;
                 layerState.losslessCompressedBytes += stats.compressedBytes;
                 layerState.losslessDecompressedBytes += stats.decompressedBytes;
