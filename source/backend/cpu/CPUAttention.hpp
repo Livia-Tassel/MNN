@@ -32,6 +32,16 @@ public:
 private:
     struct H2OSharedState {
         struct LayerState {
+            struct LosslessBlock {
+                int startToken = 0;
+                int tokenCount = 0;
+                uint64_t rawBytes = 0;
+                uint64_t compressedBytes = 0;
+                uint64_t rawHash = 0;
+                bool decodedOnce = false;
+                std::vector<uint8_t> keyBlob;
+                std::vector<uint8_t> valueBlob;
+            };
             std::vector<float> blockScores;
             int64_t losslessLastStep = 0;
             int losslessLastTokenBudget = 0;
@@ -42,6 +52,8 @@ private:
             int64_t losslessDecompressUs = 0;
             int64_t losslessFallbackCount = 0;
             int64_t losslessUpdateCount = 0;
+            int64_t losslessBackpressureSkipCount = 0;
+            std::vector<LosslessBlock> losslessBlocks;
         };
         std::vector<LayerState> layerStates;
         std::vector<int> reserveStorage;

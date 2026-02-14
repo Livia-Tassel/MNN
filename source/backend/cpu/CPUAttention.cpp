@@ -167,6 +167,7 @@ struct ZstdApi {
     void* handle = nullptr;
     size_t (*compressBound)(size_t) = nullptr;
     size_t (*compress)(void*, size_t, const void*, size_t, int) = nullptr;
+    size_t (*decompress)(void*, size_t, const void*, size_t) = nullptr;
     unsigned (*isError)(size_t) = nullptr;
 #endif
 };
@@ -188,35 +189,102 @@ static ZstdApi& getZstdApi() {
     if (api.handle != nullptr) {
         api.compressBound = reinterpret_cast<size_t(*)(size_t)>(dlsym(api.handle, "ZSTD_compressBound"));
         api.compress = reinterpret_cast<size_t(*)(void*, size_t, const void*, size_t, int)>(dlsym(api.handle, "ZSTD_compress"));
+        api.decompress = reinterpret_cast<size_t(*)(void*, size_t, const void*, size_t)>(dlsym(api.handle, "ZSTD_decompress"));
         api.isError = reinterpret_cast<unsigned(*)(size_t)>(dlsym(api.handle, "ZSTD_isError"));
-        api.available = (api.compressBound != nullptr && api.compress != nullptr && api.isError != nullptr);
+        api.available = (api.compressBound != nullptr
+            && api.compress != nullptr
+            && api.decompress != nullptr
+            && api.isError != nullptr);
     }
 #endif
     return api;
 }
 
-static size_t zstdEncodedSize(const uint8_t* data, size_t n, int level) {
-    if (data == nullptr || n == 0) {
-        return 0;
+static inline void writeLe32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFFu));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFFu));
+}
+
+static inline bool readLe32(const uint8_t* data, size_t size, size_t& off, uint32_t& out) {
+    if (data == nullptr || off + 4 > size) {
+        return false;
+    }
+    out = static_cast<uint32_t>(data[off + 0])
+        | (static_cast<uint32_t>(data[off + 1]) << 8)
+        | (static_cast<uint32_t>(data[off + 2]) << 16)
+        | (static_cast<uint32_t>(data[off + 3]) << 24);
+    off += 4;
+    return true;
+}
+
+static uint64_t fnv1a64(const uint8_t* data, size_t size, uint64_t seed = 1469598103934665603ULL) {
+    uint64_t hash = seed;
+    if (data == nullptr || size == 0) {
+        return hash;
+    }
+    constexpr uint64_t kPrime = 1099511628211ULL;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<uint64_t>(data[i]);
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+static bool zstdCompressToBuffer(const uint8_t* data,
+                                 size_t size,
+                                 int level,
+                                 std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size == 0) {
+        return false;
     }
     auto& api = getZstdApi();
     if (!api.available) {
-        return 0;
+        return false;
     }
 #if !defined(_WIN32)
-    const size_t bound = api.compressBound(n);
-    if (bound == 0 || bound < n / 2) {
-        return 0;
+    const size_t bound = api.compressBound(size);
+    if (bound == 0 || bound < size / 2) {
+        return false;
     }
-    std::vector<uint8_t> out(bound);
-    const size_t ret = api.compress(out.data(), out.size(), data, n, level);
+    out.resize(bound);
+    const size_t ret = api.compress(out.data(), out.size(), data, size, level);
     if (api.isError(ret) != 0) {
-        return 0;
+        out.clear();
+        return false;
     }
-    return ret;
+    out.resize(ret);
+    return true;
 #else
     (void)level;
-    return 0;
+    return false;
+#endif
+}
+
+static bool zstdDecompressToBuffer(const uint8_t* data,
+                                   size_t size,
+                                   size_t expectedBytes,
+                                   std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size == 0 || expectedBytes == 0) {
+        return false;
+    }
+    auto& api = getZstdApi();
+    if (!api.available) {
+        return false;
+    }
+#if !defined(_WIN32)
+    out.resize(expectedBytes);
+    const size_t ret = api.decompress(out.data(), out.size(), data, size);
+    if (api.isError(ret) != 0 || ret != expectedBytes) {
+        out.clear();
+        return false;
+    }
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -277,6 +345,25 @@ static void buildXorSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& d
     }
 }
 
+static void recoverDeltaSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+    dst.resize(src.size());
+    uint8_t prev = 0;
+    for (size_t i = 0; i < src.size(); ++i) {
+        prev = static_cast<uint8_t>(prev + src[i]);
+        dst[i] = prev;
+    }
+}
+
+static void recoverXorSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& dst) {
+    dst.resize(src.size());
+    uint8_t prev = 0;
+    for (size_t i = 0; i < src.size(); ++i) {
+        const uint8_t cur = static_cast<uint8_t>(src[i] ^ prev);
+        dst[i] = cur;
+        prev = cur;
+    }
+}
+
 static inline size_t repeatRunLen(const uint8_t* data, size_t n, size_t pos) {
     if (pos >= n) {
         return 0;
@@ -291,85 +378,224 @@ static inline size_t repeatRunLen(const uint8_t* data, size_t n, size_t pos) {
 // RLE stream format:
 // - Literal run: 1-byte ctrl [0..127] means len=ctrl+1, followed by literal bytes.
 // - Repeat  run: 1-byte ctrl [128..255] means len=(ctrl&127)+4, followed by repeated byte.
-static size_t rleEncodedSize(const uint8_t* data, size_t n) {
-    if (data == nullptr || n == 0) {
-        return 0;
+static bool rleEncode(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size == 0) {
+        return false;
     }
-    size_t outBytes = 0;
+    out.reserve(size + size / 8 + 16);
     size_t i = 0;
-    while (i < n) {
-        size_t run = repeatRunLen(data, n, i);
+    while (i < size) {
+        size_t run = repeatRunLen(data, size, i);
         if (run >= 4) {
-            outBytes += 2;
+            MNN_ASSERT(run >= 4 && run <= 131);
+            out.push_back(static_cast<uint8_t>(0x80 | static_cast<uint8_t>(run - 4)));
+            out.push_back(data[i]);
             i += run;
             continue;
         }
         const size_t litBegin = i;
         size_t litLen = 0;
-        while (i < n && litLen < 128) {
-            run = repeatRunLen(data, n, i);
+        while (i < size && litLen < 128) {
+            run = repeatRunLen(data, size, i);
             if (run >= 4) {
                 break;
             }
             ++i;
             ++litLen;
         }
-        MNN_ASSERT(litLen > 0);
-        outBytes += 1 + (i - litBegin);
+        if (litLen == 0) {
+            return false;
+        }
+        out.push_back(static_cast<uint8_t>(litLen - 1));
+        out.insert(out.end(), data + litBegin, data + litBegin + litLen);
     }
-    return outBytes;
+    return true;
 }
 
-// Encode one byte stream with predictor search and payload compression.
-// Frame bytes:
-// - mode: 1 byte (0 raw, 1 delta_seq, 2 xor_seq)
-// - codec: 1 byte (0 RLE, 1 zstd)
-// - original length: 4 bytes (LE)
-// - payload bytes
-static size_t predictiveRLEEncodedSize(const std::vector<uint8_t>& src,
-                                       const PredictorFlags& flags,
-                                       std::vector<uint8_t>& temp) {
-    if (src.empty()) {
-        return 6;
+static bool rleDecode(const uint8_t* data, size_t size, size_t expectedBytes, std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size == 0 || expectedBytes == 0) {
+        return false;
     }
-    size_t bestPayload = std::numeric_limits<size_t>::max();
-    const int zstdLevel = 3;
-    auto betterPayload = [&](const std::vector<uint8_t>& stream) -> size_t {
-        const size_t rleBytes = rleEncodedSize(stream.data(), stream.size());
-        size_t best = rleBytes;
-        const size_t zstdBytes = zstdEncodedSize(stream.data(), stream.size(), zstdLevel);
-        if (zstdBytes > 0) {
-            best = ALIMIN(best, zstdBytes);
+    out.reserve(expectedBytes);
+    size_t off = 0;
+    while (off < size) {
+        const uint8_t ctrl = data[off++];
+        if (ctrl < 128) {
+            const size_t litLen = static_cast<size_t>(ctrl) + 1;
+            if (off + litLen > size || out.size() + litLen > expectedBytes) {
+                return false;
+            }
+            out.insert(out.end(), data + off, data + off + litLen);
+            off += litLen;
+            continue;
         }
-        return best;
+        const size_t runLen = static_cast<size_t>(ctrl & 127) + 4;
+        if (off >= size || out.size() + runLen > expectedBytes) {
+            return false;
+        }
+        out.insert(out.end(), runLen, data[off]);
+        off += 1;
+    }
+    return out.size() == expectedBytes;
+}
+
+enum PredictiveMode : uint8_t {
+    MODE_RAW = 0,
+    MODE_DELTA_SEQ = 1,
+    MODE_XOR_SEQ = 2,
+};
+
+enum PayloadCodec : uint8_t {
+    CODEC_RLE = 0,
+    CODEC_ZSTD = 1,
+};
+
+static bool encodePredictiveStream(const std::vector<uint8_t>& src,
+                                   const PredictorFlags& flags,
+                                   std::vector<uint8_t>& out) {
+    out.clear();
+    if (src.empty()) {
+        out.reserve(10);
+        out.push_back(static_cast<uint8_t>(MODE_RAW));
+        out.push_back(static_cast<uint8_t>(CODEC_RLE));
+        writeLe32(out, 0);
+        writeLe32(out, 0);
+        return true;
+    }
+
+    struct Candidate {
+        bool valid = false;
+        uint8_t mode = static_cast<uint8_t>(MODE_RAW);
+        uint8_t codec = static_cast<uint8_t>(CODEC_RLE);
+        std::vector<uint8_t> payload;
     };
+    Candidate best;
+    std::vector<uint8_t> transformed;
+    std::vector<uint8_t> rlePayload;
+    std::vector<uint8_t> zstdPayload;
+
+    auto tryMode = [&](uint8_t mode, const std::vector<uint8_t>& stream) {
+        if (!rleEncode(stream.data(), stream.size(), rlePayload)) {
+            return;
+        }
+        Candidate rleCand;
+        rleCand.valid = true;
+        rleCand.mode = mode;
+        rleCand.codec = static_cast<uint8_t>(CODEC_RLE);
+        rleCand.payload = rlePayload;
+
+        Candidate zstdCand;
+        if (zstdCompressToBuffer(stream.data(), stream.size(), 3, zstdPayload) && !zstdPayload.empty()) {
+            zstdCand.valid = true;
+            zstdCand.mode = mode;
+            zstdCand.codec = static_cast<uint8_t>(CODEC_ZSTD);
+            zstdCand.payload = zstdPayload;
+        }
+
+        auto better = [](const Candidate& a, const Candidate& b) {
+            if (!b.valid) {
+                return true;
+            }
+            return a.payload.size() < b.payload.size();
+        };
+        if (rleCand.valid && better(rleCand, best)) {
+            best = std::move(rleCand);
+        }
+        if (zstdCand.valid && better(zstdCand, best)) {
+            best = std::move(zstdCand);
+        }
+    };
+
     if (flags.raw) {
-        bestPayload = ALIMIN(bestPayload, betterPayload(src));
+        tryMode(static_cast<uint8_t>(MODE_RAW), src);
     }
     if (flags.deltaSeq) {
-        buildDeltaSeq(src, temp);
-        bestPayload = ALIMIN(bestPayload, betterPayload(temp));
+        buildDeltaSeq(src, transformed);
+        tryMode(static_cast<uint8_t>(MODE_DELTA_SEQ), transformed);
     }
     if (flags.xorSeq) {
-        buildXorSeq(src, temp);
-        bestPayload = ALIMIN(bestPayload, betterPayload(temp));
+        buildXorSeq(src, transformed);
+        tryMode(static_cast<uint8_t>(MODE_XOR_SEQ), transformed);
     }
-    if (bestPayload == std::numeric_limits<size_t>::max()) {
-        bestPayload = betterPayload(src);
+    if (!best.valid) {
+        tryMode(static_cast<uint8_t>(MODE_RAW), src);
     }
-    // stream frame bytes:
-    // mode(1) + codec(1) + raw_len(4) + payload
-    return 1 + 1 + 4 + bestPayload;
+    if (!best.valid) {
+        return false;
+    }
+
+    out.reserve(10 + best.payload.size());
+    out.push_back(best.mode);
+    out.push_back(best.codec);
+    writeLe32(out, static_cast<uint32_t>(src.size()));
+    writeLe32(out, static_cast<uint32_t>(best.payload.size()));
+    out.insert(out.end(), best.payload.begin(), best.payload.end());
+    return true;
 }
 
-// Runtime bitstream size for fp16 gear-split + predictor + payload compression
-// (prefer zstd level-3 if available, fallback to RLE).
-static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
-                                            size_t bytes,
-                                            const PredictorFlags& loFlags,
-                                            const PredictorFlags& hiFlags) {
-    if (data == nullptr || bytes < 2) {
-        return bytes;
+static bool decodePredictiveStream(const uint8_t* data,
+                                   size_t size,
+                                   size_t& off,
+                                   std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || off + 10 > size) {
+        return false;
+    }
+    const uint8_t mode = data[off++];
+    const uint8_t codec = data[off++];
+    uint32_t rawLen = 0;
+    uint32_t payloadLen = 0;
+    if (!readLe32(data, size, off, rawLen) || !readLe32(data, size, off, payloadLen)) {
+        return false;
+    }
+    if (off + payloadLen > size) {
+        return false;
+    }
+    const uint8_t* payloadPtr = data + off;
+    off += payloadLen;
+    if (rawLen == 0) {
+        out.clear();
+        return payloadLen == 0;
+    }
+
+    std::vector<uint8_t> transformed;
+    if (codec == static_cast<uint8_t>(CODEC_RLE)) {
+        if (!rleDecode(payloadPtr, payloadLen, rawLen, transformed)) {
+            return false;
+        }
+    } else if (codec == static_cast<uint8_t>(CODEC_ZSTD)) {
+        if (!zstdDecompressToBuffer(payloadPtr, payloadLen, rawLen, transformed)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (transformed.size() != rawLen) {
+        return false;
+    }
+
+    if (mode == static_cast<uint8_t>(MODE_RAW)) {
+        out = std::move(transformed);
+    } else if (mode == static_cast<uint8_t>(MODE_DELTA_SEQ)) {
+        recoverDeltaSeq(transformed, out);
+    } else if (mode == static_cast<uint8_t>(MODE_XOR_SEQ)) {
+        recoverXorSeq(transformed, out);
+    } else {
+        return false;
+    }
+    return out.size() == rawLen;
+}
+
+static bool encodeFp16GearPredictive(const uint8_t* data,
+                                     size_t bytes,
+                                     const PredictorFlags& loFlags,
+                                     const PredictorFlags& hiFlags,
+                                     std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || bytes < 2 || (bytes % 2) != 0) {
+        return false;
     }
     const size_t words = bytes / 2;
     std::vector<uint8_t> lo(words);
@@ -378,24 +604,56 @@ static size_t fp16GearPredictiveEncodedSize(const uint8_t* data,
         lo[i] = data[2 * i + 0];
         hi[i] = data[2 * i + 1];
     }
-    std::vector<uint8_t> temp;
-    // Tensor frame:
-    // - word_count: 4 bytes
-    // - lo stream frame
-    // - hi stream frame
-    size_t encoded = 4;
-    encoded += predictiveRLEEncodedSize(lo, loFlags, temp);
-    encoded += predictiveRLEEncodedSize(hi, hiFlags, temp);
-    return encoded;
+    std::vector<uint8_t> loFrame;
+    std::vector<uint8_t> hiFrame;
+    if (!encodePredictiveStream(lo, loFlags, loFrame)
+        || !encodePredictiveStream(hi, hiFlags, hiFrame)) {
+        return false;
+    }
+
+    out.reserve(4 + loFrame.size() + hiFrame.size());
+    writeLe32(out, static_cast<uint32_t>(words));
+    out.insert(out.end(), loFrame.begin(), loFrame.end());
+    out.insert(out.end(), hiFrame.begin(), hiFrame.end());
+    return true;
 }
 
-// Runtime bitstream size for fp32 by-lane predictor + payload compression.
-// Split every float word into 4 byte lanes and encode each lane independently.
-static size_t fp32LanePredictiveEncodedSize(const uint8_t* data,
-                                            size_t bytes,
-                                            const PredictorFlags& flags) {
-    if (data == nullptr || bytes < 4) {
-        return bytes;
+static bool decodeFp16GearPredictive(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size < 4) {
+        return false;
+    }
+    size_t off = 0;
+    uint32_t words = 0;
+    if (!readLe32(data, size, off, words) || words == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> lo;
+    std::vector<uint8_t> hi;
+    if (!decodePredictiveStream(data, size, off, lo)
+        || !decodePredictiveStream(data, size, off, hi)) {
+        return false;
+    }
+    if (lo.size() != words || hi.size() != words || off != size) {
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(words) * 2);
+    for (size_t i = 0; i < words; ++i) {
+        out[2 * i + 0] = lo[i];
+        out[2 * i + 1] = hi[i];
+    }
+    return true;
+}
+
+static bool encodeFp32LanePredictive(const uint8_t* data,
+                                     size_t bytes,
+                                     const PredictorFlags& flags,
+                                     std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || bytes < 4 || (bytes % 4) != 0) {
+        return false;
     }
     const size_t words = bytes / 4;
     std::vector<uint8_t> lane0(words), lane1(words), lane2(words), lane3(words);
@@ -405,13 +663,54 @@ static size_t fp32LanePredictiveEncodedSize(const uint8_t* data,
         lane2[i] = data[4 * i + 2];
         lane3[i] = data[4 * i + 3];
     }
-    std::vector<uint8_t> temp;
-    size_t encoded = 4; // word_count
-    encoded += predictiveRLEEncodedSize(lane0, flags, temp);
-    encoded += predictiveRLEEncodedSize(lane1, flags, temp);
-    encoded += predictiveRLEEncodedSize(lane2, flags, temp);
-    encoded += predictiveRLEEncodedSize(lane3, flags, temp);
-    return encoded;
+    std::vector<uint8_t> f0, f1, f2, f3;
+    if (!encodePredictiveStream(lane0, flags, f0)
+        || !encodePredictiveStream(lane1, flags, f1)
+        || !encodePredictiveStream(lane2, flags, f2)
+        || !encodePredictiveStream(lane3, flags, f3)) {
+        return false;
+    }
+    out.reserve(4 + f0.size() + f1.size() + f2.size() + f3.size());
+    writeLe32(out, static_cast<uint32_t>(words));
+    out.insert(out.end(), f0.begin(), f0.end());
+    out.insert(out.end(), f1.begin(), f1.end());
+    out.insert(out.end(), f2.begin(), f2.end());
+    out.insert(out.end(), f3.begin(), f3.end());
+    return true;
+}
+
+static bool decodeFp32LanePredictive(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    out.clear();
+    if (data == nullptr || size < 4) {
+        return false;
+    }
+    size_t off = 0;
+    uint32_t words = 0;
+    if (!readLe32(data, size, off, words) || words == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> lanes[4];
+    for (int i = 0; i < 4; ++i) {
+        if (!decodePredictiveStream(data, size, off, lanes[i])) {
+            return false;
+        }
+        if (lanes[i].size() != words) {
+            return false;
+        }
+    }
+    if (off != size) {
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(words) * 4);
+    for (size_t i = 0; i < words; ++i) {
+        out[4 * i + 0] = lanes[0][i];
+        out[4 * i + 1] = lanes[1][i];
+        out[4 * i + 2] = lanes[2][i];
+        out[4 * i + 3] = lanes[3][i];
+    }
+    return true;
 }
 
 static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
@@ -765,6 +1064,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             state.losslessDecompressUs = 0;
             state.losslessFallbackCount = 0;
             state.losslessUpdateCount = 0;
+            state.losslessBackpressureSkipCount = 0;
+            state.losslessBlocks.clear();
         }
     }
     int h2oLayerStart = 0;
@@ -1422,8 +1723,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             int64_t compressUs = 0;
             int64_t decompressUs = 0;
             bool fallbackUsed = false;
+            bool backpressureSkipped = false;
+            uint64_t rawHash = 0;
+            std::vector<uint8_t> keyBlob;
+            std::vector<uint8_t> valueBlob;
         };
-        auto estimateLosslessRuntimeStats = [&](int startToken, int tokenCount) -> LosslessRuntimeStats {
+        auto encodeLosslessRuntimeStats = [&](int startToken, int tokenCount) -> LosslessRuntimeStats {
             LosslessRuntimeStats stats;
             if (mMeta->h2o_lossless_codec != 1
                 || mMeta->h2o_lossless_runtime_enable == 0
@@ -1440,10 +1745,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             if (evalTokens <= 0) {
                 return stats;
             }
-            const double logicalRawBytes = (double)evalTokens
-                * (double)mKvNumHead
-                * (double)mHeadDim
-                * (double)mBytes * 2.0;
             const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
             const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
@@ -1463,48 +1764,130 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 valueMerged);
 
             const uint64_t rawFullBytes = (uint64_t)keyMerged.size() + (uint64_t)valueMerged.size();
+            if (rawFullBytes == 0) {
+                stats.fallbackUsed = true;
+                return stats;
+            }
+
+            stats.rawBytes = rawFullBytes;
+            const uint64_t keyHash = fnv1a64(keyMerged.data(), keyMerged.size());
+            stats.rawHash = fnv1a64(valueMerged.data(), valueMerged.size(), keyHash);
+
             auto c0 = std::chrono::high_resolution_clock::now();
-            uint64_t compressedFullBytes = 0;
+            bool keyOk = false;
+            bool valueOk = false;
             if (!keyMerged.empty()) {
                 if (mBytes == 2) {
-                    compressedFullBytes += fp16GearPredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags);
+                    keyOk = encodeFp16GearPredictive(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags, stats.keyBlob);
                 } else {
-                    compressedFullBytes += fp32LanePredictiveEncodedSize(keyMerged.data(), keyMerged.size(), keyFlags);
+                    keyOk = encodeFp32LanePredictive(keyMerged.data(), keyMerged.size(), keyFlags, stats.keyBlob);
                 }
+            } else {
+                keyOk = true;
             }
             if (!valueMerged.empty()) {
                 if (mBytes == 2) {
-                    compressedFullBytes += fp16GearPredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags);
+                    valueOk = encodeFp16GearPredictive(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags, stats.valueBlob);
                 } else {
-                    compressedFullBytes += fp32LanePredictiveEncodedSize(valueMerged.data(), valueMerged.size(), valueFlags);
+                    valueOk = encodeFp32LanePredictive(valueMerged.data(), valueMerged.size(), valueFlags, stats.valueBlob);
                 }
+            } else {
+                valueOk = true;
             }
             auto c1 = std::chrono::high_resolution_clock::now();
             stats.compressUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(c1 - c0).count();
 
-            if (rawFullBytes == 0 || compressedFullBytes == 0) {
+            if (!keyOk || !valueOk) {
                 stats.fallbackUsed = true;
-                stats.rawBytes = static_cast<uint64_t>(ALIMAX(0.0, std::round(logicalRawBytes)));
+                stats.keyBlob.clear();
+                stats.valueBlob.clear();
                 stats.compressedBytes = stats.rawBytes;
                 stats.attemptedCompressedBytes = stats.rawBytes;
-                stats.decompressedBytes = stats.rawBytes;
+                stats.attemptedRatio = 1.0f;
+                stats.ratio = 1.0f;
                 return stats;
             }
-            stats.attemptedCompressedBytes = compressedFullBytes;
-            stats.attemptedRatio = compressedFullBytes > 0
-                ? static_cast<float>((double)rawFullBytes / (double)compressedFullBytes)
-                : 1.0f;
-            if (compressedFullBytes > rawFullBytes) {
-                compressedFullBytes = rawFullBytes;
+
+            const uint64_t attemptedBytes = static_cast<uint64_t>(stats.keyBlob.size() + stats.valueBlob.size());
+            if (attemptedBytes == 0) {
                 stats.fallbackUsed = true;
+                stats.keyBlob.clear();
+                stats.valueBlob.clear();
+                stats.compressedBytes = stats.rawBytes;
+                stats.attemptedCompressedBytes = stats.rawBytes;
+                stats.attemptedRatio = 1.0f;
+                stats.ratio = 1.0f;
+                return stats;
             }
-            stats.rawBytes = rawFullBytes;
-            stats.compressedBytes = compressedFullBytes;
-            stats.decompressedBytes = rawFullBytes;
-            stats.ratio = compressedFullBytes > 0
-                ? static_cast<float>((double)rawFullBytes / (double)compressedFullBytes)
+            stats.attemptedCompressedBytes = attemptedBytes;
+            stats.attemptedRatio = attemptedBytes > 0
+                ? static_cast<float>((double)rawFullBytes / (double)attemptedBytes)
+                : 1.0f;
+            if (attemptedBytes >= rawFullBytes) {
+                stats.fallbackUsed = true;
+                stats.keyBlob.clear();
+                stats.valueBlob.clear();
+                stats.compressedBytes = stats.rawBytes;
+                stats.ratio = 1.0f;
+                return stats;
+            }
+            stats.compressedBytes = attemptedBytes;
+            stats.ratio = attemptedBytes > 0
+                ? static_cast<float>((double)rawFullBytes / (double)attemptedBytes)
                 : 1.0f;
             return stats;
+        };
+
+        auto decodeOnePendingLosslessBlock = [&](CPUAttention::H2OSharedState::LayerState& layerState) {
+            for (auto& block : layerState.losslessBlocks) {
+                if (block.decodedOnce) {
+                    continue;
+                }
+                block.decodedOnce = true;
+                if (block.keyBlob.empty() && block.valueBlob.empty()) {
+                    layerState.losslessFallbackCount += 1;
+                    return;
+                }
+                std::vector<uint8_t> keyDecoded;
+                std::vector<uint8_t> valueDecoded;
+                auto d0 = std::chrono::high_resolution_clock::now();
+                bool keyOk = true;
+                bool valueOk = true;
+                if (!block.keyBlob.empty()) {
+                    if (mBytes == 2) {
+                        keyOk = decodeFp16GearPredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
+                    } else {
+                        keyOk = decodeFp32LanePredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
+                    }
+                }
+                if (!block.valueBlob.empty()) {
+                    if (mBytes == 2) {
+                        valueOk = decodeFp16GearPredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
+                    } else {
+                        valueOk = decodeFp32LanePredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
+                    }
+                }
+                auto d1 = std::chrono::high_resolution_clock::now();
+                const int64_t decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
+                if (!keyOk || !valueOk) {
+                    layerState.losslessFallbackCount += 1;
+                    return;
+                }
+                const uint64_t decodedBytes = static_cast<uint64_t>(keyDecoded.size() + valueDecoded.size());
+                if (decodedBytes != block.rawBytes) {
+                    layerState.losslessFallbackCount += 1;
+                    return;
+                }
+                uint64_t decodedHash = fnv1a64(keyDecoded.data(), keyDecoded.size());
+                decodedHash = fnv1a64(valueDecoded.data(), valueDecoded.size(), decodedHash);
+                if (mMeta->h2o_lossless_strict_roundtrip_check != 0 && decodedHash != block.rawHash) {
+                    layerState.losslessFallbackCount += 1;
+                    return;
+                }
+                layerState.losslessDecompressUs += decodeUs;
+                layerState.losslessDecompressedBytes += decodedBytes;
+                return;
+            }
         };
 
         bool applyLossless = false;
@@ -1533,7 +1916,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 // kvSeqLen < triggerMin the bootstrap can never re-run.
                 layerState.losslessLastStep = 0;
                 layerState.losslessLastTokenBudget = losslessTokenBudget;
+                layerState.losslessBlocks.clear();
             }
+
+            decodeOnePendingLosslessBlock(layerState);
+            int64_t pendingQueueDepth = 0;
+            for (const auto& block : layerState.losslessBlocks) {
+                if (!block.decodedOnce) {
+                    pendingQueueDepth += 1;
+                }
+            }
+            mH2OState->globalLosslessQueueDepthPeak =
+                ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingQueueDepth);
 
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
@@ -1557,7 +1951,52 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
             if (evalTokenCount > 0) {
                 const int evalStartToken = layerState.losslessLastTokenBudget;
-                const auto stats = estimateLosslessRuntimeStats(evalStartToken, evalTokenCount);
+                auto stats = encodeLosslessRuntimeStats(evalStartToken, evalTokenCount);
+                if (!stats.fallbackUsed) {
+                    const int maxQueue = ALIMAX(1, mMeta->h2o_lossless_max_queue);
+                    int pending = 0;
+                    for (const auto& block : layerState.losslessBlocks) {
+                        if (!block.decodedOnce) {
+                            pending += 1;
+                        }
+                    }
+                    if (pending >= maxQueue) {
+                        stats.fallbackUsed = true;
+                        stats.backpressureSkipped = true;
+                        stats.compressedBytes = stats.rawBytes;
+                        stats.ratio = 1.0f;
+                        stats.keyBlob.clear();
+                        stats.valueBlob.clear();
+                        layerState.losslessBackpressureSkipCount += 1;
+                    }
+                }
+                if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
+                    CPUAttention::H2OSharedState::LayerState::LosslessBlock block;
+                    block.startToken = evalStartToken;
+                    block.tokenCount = evalTokenCount;
+                    block.rawBytes = stats.rawBytes;
+                    block.compressedBytes = stats.compressedBytes;
+                    block.rawHash = stats.rawHash;
+                    block.decodedOnce = false;
+                    block.keyBlob.swap(stats.keyBlob);
+                    block.valueBlob.swap(stats.valueBlob);
+                    layerState.losslessBlocks.emplace_back(std::move(block));
+
+                    const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
+                    if (decodeCacheBlocks > 0) {
+                        while ((int)layerState.losslessBlocks.size() > decodeCacheBlocks) {
+                            layerState.losslessBlocks.erase(layerState.losslessBlocks.begin());
+                        }
+                    }
+                    int64_t pendingAfterPush = 0;
+                    for (const auto& b : layerState.losslessBlocks) {
+                        if (!b.decodedOnce) {
+                            pendingAfterPush += 1;
+                        }
+                    }
+                    mH2OState->globalLosslessQueueDepthPeak =
+                        ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterPush);
+                }
                 layerState.losslessRawBytes += stats.rawBytes;
                 layerState.losslessCompressedBytes += stats.compressedBytes;
                 layerState.losslessDecompressedBytes += stats.decompressedBytes;
@@ -1585,7 +2024,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
                 if (mMeta->h2o_log_stats != 0) {
                     const bool zstdReady = getZstdApi().available;
-                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld updates=%lld fallback=%d zstd=%d\n",
+                    int pendingAfterUpdate = 0;
+                    for (const auto& block : layerState.losslessBlocks) {
+                        if (!block.decodedOnce) {
+                            pendingAfterUpdate += 1;
+                        }
+                    }
+                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d zstd=%d\n",
                               layerIndex,
                               kvSeqLen,
                               evalStartToken,
@@ -1596,8 +2041,11 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                               stats.attemptedRatio,
                               stats.ratio,
                               (long long)stats.compressUs,
+                              (long long)layerState.losslessDecompressUs,
                               (long long)layerState.losslessUpdateCount,
                               stats.fallbackUsed ? 1 : 0,
+                              stats.backpressureSkipped ? 1 : 0,
+                              pendingAfterUpdate,
                               zstdReady ? 1 : 0);
                 }
             }
