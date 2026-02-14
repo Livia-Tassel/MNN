@@ -735,9 +735,29 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
     }
 
     const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
+    std::vector<const uint8_t*> keyPtrs;
+    std::vector<const uint8_t*> valuePtrs;
+    keyPtrs.reserve(kvNumHead);
+    valuePtrs.reserve(kvNumHead);
+    for (int h = 0; h < kvNumHead; ++h) {
+        const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfKey(h));
+        const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfValue(h));
+        if (keyPtr == nullptr || valuePtr == nullptr) {
+            continue;
+        }
+        keyPtrs.emplace_back(keyPtr);
+        valuePtrs.emplace_back(valuePtr);
+    }
+    if (keyPtrs.empty()) {
+        return;
+    }
+
     const size_t logicalBytesPerHead = (size_t)tokenCount * (size_t)headDim * (size_t)bytes;
-    keyMerged.reserve((size_t)kvNumHead * logicalBytesPerHead);
-    valueMerged.reserve((size_t)kvNumHead * logicalBytesPerHead);
+    const size_t totalBytes = (size_t)keyPtrs.size() * logicalBytesPerHead;
+    keyMerged.resize(totalBytes);
+    valueMerged.resize(totalBytes);
+    uint8_t* keyOut = keyMerged.data();
+    uint8_t* valueOut = valueMerged.data();
 
     const size_t keyStride0 = (size_t)ROUND_UP(headDim, lPack) * (size_t)hPack;
     const size_t keyStride1 = (size_t)hPack * (size_t)lPack;
@@ -745,12 +765,9 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
     const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
     const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
 
-    for (int h = 0; h < kvNumHead; ++h) {
-        const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfKey(h));
-        const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfValue(h));
-        if (keyPtr == nullptr || valuePtr == nullptr) {
-            continue;
-        }
+    for (size_t h = 0; h < keyPtrs.size(); ++h) {
+        const uint8_t* keyPtr = keyPtrs[h];
+        const uint8_t* valuePtr = valuePtrs[h];
         for (int local = 0; local < tokenCount; ++local) {
             const int seq = startToken + local;
             const int seqOut = seq / hPack;
@@ -767,17 +784,15 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
                     + (size_t)(dim / lPack) * keyStride1
                     + (size_t)(dim % lPack);
                 const uint8_t* keyElem = keyPtr + keyIndex * (size_t)bytes;
-                for (int b = 0; b < bytes; ++b) {
-                    keyMerged.push_back(keyElem[b]);
-                }
+                ::memcpy(keyOut, keyElem, (size_t)bytes);
+                keyOut += bytes;
 
                 const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
                     + (size_t)(dim % hPack) * (size_t)lPack
                     + valueInner;
                 const uint8_t* valueElem = valuePtr + valueIndex * (size_t)bytes;
-                for (int b = 0; b < bytes; ++b) {
-                    valueMerged.push_back(valueElem[b]);
-                }
+                ::memcpy(valueOut, valueElem, (size_t)bytes);
+                valueOut += bytes;
             }
         }
     }
