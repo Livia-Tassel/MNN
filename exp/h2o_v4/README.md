@@ -107,6 +107,9 @@ bash exp/h2o_v4/run_full_eval.sh \
   - `front_n`: apply runtime lossless to first `kv_lossless_front_n` layers.
   - `h2o_kept`: apply runtime lossless to H2O active layer range and its kept budget.
   - `front_n_and_h2o_kept` (or `front_n+h2o_kept`): apply both together.
+- Runtime note:
+  - In `full + front_n_and_h2o_kept`, deep kept layers use representative sampling (start layer)
+    to prevent decode TPS regression while keeping online deep-layer signal.
 
 ## Scope Boundary
 - M1 done:

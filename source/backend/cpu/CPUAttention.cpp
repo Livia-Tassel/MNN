@@ -2216,6 +2216,19 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 losslessTokenBudget = inFrontLosslessRange ? kvSeqLen : finalKeepTokensForLayer;
             }
         }
+        if (applyLossless && runtimeMode == 1 && mMeta->h2o_lossless_scope == 3) {
+            const bool inFrontLosslessRange = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
+            const bool inH2OKeptLosslessRange = h2oLayerInRange;
+            if (!inFrontLosslessRange && inH2OKeptLosslessRange) {
+                // Full-mode + joint scope is very expensive if all deep kept layers run runtime
+                // lossless on every decode token. Keep a representative kept-layer sample to
+                // protect decode TPS while preserving deep-layer online signal.
+                applyLossless = (layerIndex == h2oLayerStart);
+                if (applyLossless) {
+                    losslessTokenBudget = finalKeepTokensForLayer;
+                }
+            }
+        }
         if (applyLossless && mMeta->h2o_lossless_runtime_enable != 0 && runtimeProbeMode) {
             // Runtime path is a compression-statistics probe, not a storage rewrite.
             // Sample one representative layer per scope to cap decode perturbation.
