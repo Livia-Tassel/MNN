@@ -1924,6 +1924,15 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 losslessTokenBudget = finalKeepTokensForLayer;
             }
         }
+        if (applyLossless && mMeta->h2o_lossless_runtime_enable != 0) {
+            // Runtime path is a compression-statistics probe, not a storage rewrite.
+            // Sample one representative layer per scope to cap decode perturbation.
+            if (mMeta->h2o_lossless_scope == 1) { // front_n
+                applyLossless = (layerIndex == 0);
+            } else if (mMeta->h2o_lossless_scope == 2) { // h2o_kept
+                applyLossless = (layerIndex == h2oLayerStart);
+            }
+        }
         if (applyLossless && layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
             auto& layerState = mH2OState->layerStates[layerIndex];
             if (losslessTokenBudget < layerState.losslessLastTokenBudget) {
@@ -1959,17 +1968,19 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int64_t losslessStep = mH2OState->globalTokenStep;
             const int tokenBudgetGrowth = losslessTokenBudget - layerState.losslessLastTokenBudget;
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);
+            const int runtimeBootstrapSampleCap = 32;
+            const int bootstrapSampleTokens = ALIMAX(1, ALIMIN(blockStep, runtimeBootstrapSampleCap));
 
             int evalTokenCount = 0;
             int evalStartToken = layerState.losslessLastTokenBudget;
             bool bootstrapWindowSampled = false;
             if (kvSeqLen >= triggerMin) {
                 if (layerState.losslessUpdateCount <= 0) {
-                    // Bootstrap with one fixed-size window to cap startup overhead.
-                    // Then align watermark to current budget to avoid catch-up bursts.
-                    if (tokenBudgetGrowth >= blockStep) {
-                        evalTokenCount = blockStep;
-                        evalStartToken = ALIMAX(0, losslessTokenBudget - blockStep);
+                    // Bootstrap with a tiny fixed prefix sample to avoid decode TPS
+                    // perturbation in runtime-stats mode.
+                    if (tokenBudgetGrowth >= bootstrapSampleTokens) {
+                        evalTokenCount = bootstrapSampleTokens;
+                        evalStartToken = 0;
                         bootstrapWindowSampled = true;
                     }
                 } else if (intervalReady && tokenBudgetGrowth >= groupedStep) {
