@@ -19,6 +19,7 @@
   "kv_lossless_scope": "front_n",
   "kv_lossless_front_n": 2,
   "kv_lossless_runtime_enable": true,
+  "kv_lossless_runtime_mode": "probe",
   "kv_lossless_block_tokens": 128,
   "kv_lossless_hot_recent_tokens": 256,
   "kv_lossless_hot_sink_tokens": 16,

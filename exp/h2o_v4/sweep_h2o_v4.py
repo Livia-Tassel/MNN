@@ -76,6 +76,8 @@ def main():
         str(preset.get("kv_lossless_hot_recent_tokens", 256)),
         "--kv-lossless-hot-sink-tokens",
         str(preset.get("kv_lossless_hot_sink_tokens", 16)),
+        "--kv-lossless-runtime-mode",
+        str(preset.get("kv_lossless_runtime_mode", "probe")),
         "--kv-lossless-codec-runtime",
         str(preset.get("kv_lossless_codec_runtime", "fp16_gear_predictive_v3")),
         "--kv-lossless-predictors-k",

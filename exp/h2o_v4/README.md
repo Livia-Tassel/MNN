@@ -1,9 +1,17 @@
-# H2O v4 Runtime Lossless (M1)
+# H2O v4 Runtime Lossless (M1 Complete, M2 In Progress)
 
 This folder is the v4 experiment kit for the M1 milestone:
 - runtime lossy H2O target: `>= 3.0`
 - runtime lossless path upgraded from size-estimation to real encode/decode accounting
 - offline lossless deployment gate remains: `online_sim >= 1.3`
+
+## Latest Validated Run
+- Output: `exp/h2o_v4/out_runtime_v4_20260214_175435`
+- `quality_status: PASS`
+- `lossy_best: 3.1860` (`lossy_pass: true`)
+- `lossless_online_value: 1.4010` (`lossless_online_pass: true`)
+- `runtime_decomp_best_us: 624.0000` (`runtime_decomp_pass: true`)
+- `decode_best: 6.9900` vs baseline `6.6000` (`decode_pass: true`)
 
 ## Scripts
 - `run_h2o_v4_bench.py`: generate configs + run `llm_bench`
@@ -80,15 +88,31 @@ bash exp/h2o_v4/run_full_eval.sh \
 - `runtime_decomp_pass`: runtime `h2o_lossless_decomp_us > 0` (when `--require-runtime-decomp` is enabled)
 - `overall_pass = lossy_pass && lossless_online_pass && decode_pass && runtime_decomp_pass`
 
-## v4 M1 Scope Boundary
-- Implemented: real runtime encode blob generation + runtime decode timing/accounting path.
-- Implemented: backpressure default policy in runtime path (`skip new compression when queue is full`).
-- Not yet implemented as production storage path: replacing KV resident layout with compressed blocks for attention reads.
-- Therefore offline online-sim remains the deployment acceptance metric.
+## Runtime Mode Knob (New)
+- Config key: `kv_lossless_runtime_mode`
+- Values:
+  - `probe` (default): low-overhead representative sampling for runtime stats and gate stability.
+  - `full`: full-scope runtime sampling path for M2 tuning/diagnosis (higher overhead).
+- `test_v4_runtime.sh` and v4 presets default to `probe`.
+
+## Scope Boundary
+- M1 done:
+  - Real runtime encode blob generation + runtime decode timing/accounting path.
+  - Backpressure default policy (`skip new compression when queue is full`).
+  - Runtime decode evidence integrated into quality gate.
+- M2 in progress:
+  - Configurable runtime mode (`probe` / `full`) to separate stable gate runs from deeper runtime experiments.
+- Still not implemented as production storage path:
+  - Replacing KV resident layout with compressed blocks for direct attention reads.
+  - Therefore offline online-sim remains the deployment acceptance metric for final compression gain.
 
 ## Notes
 - Use fresh `--out-dir` for each run.
 - `test_v4_runtime.sh` writes temp files under `${OUT}/.tmp` to avoid `/tmp` exhaustion.
+- You can switch runtime sampling mode without editing the script:
+```bash
+KV_LOSSLESS_RUNTIME_MODE=full bash exp/h2o_v4/test_v4_runtime.sh
+```
 - Dependencies:
 ```bash
 pip install numpy zstandard

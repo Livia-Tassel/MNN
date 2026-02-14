@@ -76,6 +76,7 @@ def main():
     parser.add_argument("--kv-lossless-front-n", type=int, default=2)
     parser.add_argument("--kv-lossless-codec", default="none", choices=["none", "gear_delta"])
     parser.add_argument("--kv-lossless-runtime-enable", action="store_true")
+    parser.add_argument("--kv-lossless-runtime-mode", default="probe", choices=["probe", "full"])
     parser.add_argument("--kv-lossless-block-tokens", type=int, default=128)
     parser.add_argument("--kv-lossless-hot-recent-tokens", type=int, default=256)
     parser.add_argument("--kv-lossless-hot-sink-tokens", type=int, default=16)
@@ -169,6 +170,7 @@ def main():
                 "kv_lossless_front_n": int(args.kv_lossless_front_n),
                 "kv_lossless_codec": args.kv_lossless_codec,
                 "kv_lossless_runtime_enable": bool(args.kv_lossless_runtime_enable),
+                "kv_lossless_runtime_mode": args.kv_lossless_runtime_mode,
                 "kv_lossless_block_tokens": int(args.kv_lossless_block_tokens),
                 "kv_lossless_hot_recent_tokens": int(args.kv_lossless_hot_recent_tokens),
                 "kv_lossless_hot_sink_tokens": int(args.kv_lossless_hot_sink_tokens),
@@ -240,6 +242,7 @@ def main():
                 "kv_lossless_front_n": int(args.kv_lossless_front_n),
                 "kv_lossless_codec": args.kv_lossless_codec,
                 "kv_lossless_runtime_enable": bool(args.kv_lossless_runtime_enable),
+                "kv_lossless_runtime_mode": args.kv_lossless_runtime_mode,
                 "kv_lossless_block_tokens": int(args.kv_lossless_block_tokens),
                 "kv_lossless_hot_recent_tokens": int(args.kv_lossless_hot_recent_tokens),
                 "kv_lossless_hot_sink_tokens": int(args.kv_lossless_hot_sink_tokens),

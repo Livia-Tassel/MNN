@@ -45,6 +45,7 @@ KV_LOSSLESS_CODEC="gear_delta"
 KV_LOSSLESS_BLOCK_TOKENS=128
 KV_LOSSLESS_HOT_RECENT=256
 KV_LOSSLESS_HOT_SINK=16
+KV_LOSSLESS_RUNTIME_MODE="${KV_LOSSLESS_RUNTIME_MODE:-probe}"
 KV_LOSSLESS_CODEC_RUNTIME="fp16_gear_predictive_v3"
 
 # Quality gate
@@ -285,6 +286,7 @@ BENCH_ARGS=(
   --kv-lossless-front-n "${KV_LOSSLESS_FRONT_N}"
   --kv-lossless-codec "${KV_LOSSLESS_CODEC}"
   --kv-lossless-runtime-enable
+  --kv-lossless-runtime-mode "${KV_LOSSLESS_RUNTIME_MODE}"
   --kv-lossless-codec-runtime "${KV_LOSSLESS_CODEC_RUNTIME}"
   --kv-lossless-block-tokens "${KV_LOSSLESS_BLOCK_TOKENS}"
   --kv-lossless-hot-recent-tokens "${KV_LOSSLESS_HOT_RECENT}"

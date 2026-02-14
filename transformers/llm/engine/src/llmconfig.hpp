@@ -504,6 +504,9 @@ public:
     bool kv_lossless_runtime_enable() const {
         return config_.value("kv_lossless_runtime_enable", false);
     }
+    std::string kv_lossless_runtime_mode() const {
+        return config_.value("kv_lossless_runtime_mode", "probe");
+    }
     int kv_lossless_block_tokens() const {
         return config_.value("kv_lossless_block_tokens", 128);
     }

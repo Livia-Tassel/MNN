@@ -95,6 +95,8 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     const auto codec = cfg->kv_lossless_codec();
     meta->h2o_lossless_codec = (codec == "gear_delta") ? 1 : 0;
     meta->h2o_lossless_runtime_enable = cfg->kv_lossless_runtime_enable() ? 1 : 0;
+    const auto runtimeMode = cfg->kv_lossless_runtime_mode();
+    meta->h2o_lossless_runtime_mode = (runtimeMode == "full") ? 1 : 0;
     meta->h2o_lossless_block_tokens = ALIMAX(1, cfg->kv_lossless_block_tokens());
     meta->h2o_lossless_hot_recent_tokens = ALIMAX(0, cfg->kv_lossless_hot_recent_tokens());
     meta->h2o_lossless_hot_sink_tokens = ALIMAX(0, cfg->kv_lossless_hot_sink_tokens());
