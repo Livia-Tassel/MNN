@@ -76,7 +76,7 @@ def main():
     parser.add_argument("--kv-lossless-front-n", type=int, default=2)
     parser.add_argument("--kv-lossless-codec", default="none", choices=["none", "gear_delta"])
     parser.add_argument("--kv-lossless-runtime-enable", action="store_true")
-    parser.add_argument("--kv-lossless-runtime-mode", default="probe", choices=["probe", "full"])
+    parser.add_argument("--kv-lossless-runtime-mode", default="probe", choices=["probe", "full", "store"])
     parser.add_argument("--kv-lossless-block-tokens", type=int, default=128)
     parser.add_argument("--kv-lossless-hot-recent-tokens", type=int, default=256)
     parser.add_argument("--kv-lossless-hot-sink-tokens", type=int, default=16)

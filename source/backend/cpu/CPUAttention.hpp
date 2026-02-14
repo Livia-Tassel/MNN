@@ -39,6 +39,7 @@ private:
                 uint64_t compressedBytes = 0;
                 uint64_t rawHash = 0;
                 bool decodedOnce = false;
+                bool rawDropped = false;
                 std::vector<uint8_t> keyBlob;
                 std::vector<uint8_t> valueBlob;
             };

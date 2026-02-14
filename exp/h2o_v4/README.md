@@ -6,12 +6,14 @@ This folder is the v4 experiment kit for the M1 milestone:
 - offline lossless deployment gate remains: `online_sim >= 1.3`
 
 ## Latest Validated Run
-- Output: `exp/h2o_v4/out_runtime_v4_20260214_175435`
-- `quality_status: PASS`
-- `lossy_best: 3.1860` (`lossy_pass: true`)
-- `lossless_online_value: 1.4010` (`lossless_online_pass: true`)
-- `runtime_decomp_best_us: 624.0000` (`runtime_decomp_pass: true`)
-- `decode_best: 6.9900` vs baseline `6.6000` (`decode_pass: true`)
+- Probe output: `exp/h2o_v4/out_runtime_v4_20260214_182357`
+  - `quality_status: PASS`
+  - `runtime_decomp_best_us: 589.6700`
+  - `decode_best: 6.9700` vs baseline `6.6000`
+- Full output: `exp/h2o_v4/out_runtime_v4_20260214_200411`
+  - `quality_status: PASS`
+  - `runtime_decomp_best_us: 6246.3300`
+  - `decode_best: 6.7000` vs baseline `6.6000`
 
 ## Scripts
 - `run_h2o_v4_bench.py`: generate configs + run `llm_bench`
@@ -47,6 +49,7 @@ python3 exp/h2o_v4/sweep_h2o_v4.py \
   --preset exp/h2o_v4/configs/target_ratio_v4.json \
   --out-dir exp/h2o_v4/out_tune_v4_$(date +%Y%m%d_%H%M%S)
 ```
+For store-mode experiments, use `--preset exp/h2o_v4/configs/target_store_v4.json`.
 
 ## Parse + Analyze
 ```bash
@@ -93,6 +96,7 @@ bash exp/h2o_v4/run_full_eval.sh \
 - Values:
   - `probe` (default): low-overhead representative sampling for runtime stats and gate stability.
   - `full`: full-scope runtime sampling path for M2 tuning/diagnosis (higher overhead).
+  - `store` (experimental): compress then drop selected raw KV slices and restore on next decode step before use.
 - `test_v4_runtime.sh` and v4 presets default to `probe`.
 
 ## Scope Boundary
@@ -112,6 +116,10 @@ bash exp/h2o_v4/run_full_eval.sh \
 - You can switch runtime sampling mode without editing the script:
 ```bash
 KV_LOSSLESS_RUNTIME_MODE=full bash exp/h2o_v4/test_v4_runtime.sh
+```
+Store mode:
+```bash
+KV_LOSSLESS_RUNTIME_MODE=store bash exp/h2o_v4/test_v4_runtime.sh
 ```
 - Dependencies:
 ```bash

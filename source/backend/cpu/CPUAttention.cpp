@@ -798,6 +798,233 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
     }
 }
 
+static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
+                                 int kvNumHead,
+                                 int headDim,
+                                 int bytes,
+                                 int lPack,
+                                 int hPack,
+                                 int flashBlockKv,
+                                 int startToken,
+                                 int tokenCount,
+                                 const std::vector<uint8_t>& keyMerged,
+                                 const std::vector<uint8_t>& valueMerged) {
+    if (cacheManager == nullptr
+        || tokenCount <= 0
+        || kvNumHead <= 0
+        || headDim <= 0
+        || bytes <= 0) {
+        return false;
+    }
+    const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
+    const size_t logicalBytesPerHead = (size_t)tokenCount * (size_t)headDim * (size_t)bytes;
+    const size_t expectedBytes = (size_t)kvNumHead * logicalBytesPerHead;
+    if (keyMerged.size() != expectedBytes || valueMerged.size() != expectedBytes) {
+        return false;
+    }
+
+    std::vector<uint8_t*> keyPtrs;
+    std::vector<uint8_t*> valuePtrs;
+    keyPtrs.reserve(kvNumHead);
+    valuePtrs.reserve(kvNumHead);
+    for (int h = 0; h < kvNumHead; ++h) {
+        auto* keyPtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfKey(h));
+        auto* valuePtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfValue(h));
+        if (keyPtr == nullptr || valuePtr == nullptr) {
+            return false;
+        }
+        keyPtrs.emplace_back(keyPtr);
+        valuePtrs.emplace_back(valuePtr);
+    }
+
+    const size_t keyStride0 = (size_t)ROUND_UP(headDim, lPack) * (size_t)hPack;
+    const size_t keyStride1 = (size_t)hPack * (size_t)lPack;
+    const size_t valueStride2 = (size_t)lPack * (size_t)hPack;
+    const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
+    const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
+
+    const uint8_t* keyIn = keyMerged.data();
+    const uint8_t* valueIn = valueMerged.data();
+    for (size_t h = 0; h < keyPtrs.size(); ++h) {
+        uint8_t* keyPtr = keyPtrs[h];
+        uint8_t* valuePtr = valuePtrs[h];
+        for (int local = 0; local < tokenCount; ++local) {
+            const int seq = startToken + local;
+            const int seqOut = seq / hPack;
+            const int seqIn = seq % hPack;
+            const size_t keySeqBase = (size_t)seqOut * keyStride0 + (size_t)seqIn * (size_t)lPack;
+
+            const int seqInFlash = seq % safeFlashBlockKv;
+            const size_t valueInner = (size_t)(seq / safeFlashBlockKv) * valueStride0
+                + (size_t)(seqInFlash / lPack) * valueStride2
+                + (size_t)(seqInFlash % lPack);
+
+            for (int dim = 0; dim < headDim; ++dim) {
+                const size_t keyIndex = keySeqBase
+                    + (size_t)(dim / lPack) * keyStride1
+                    + (size_t)(dim % lPack);
+                uint8_t* keyElem = keyPtr + keyIndex * (size_t)bytes;
+                ::memcpy(keyElem, keyIn, (size_t)bytes);
+                keyIn += bytes;
+
+                const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
+                    + (size_t)(dim % hPack) * (size_t)lPack
+                    + valueInner;
+                uint8_t* valueElem = valuePtr + valueIndex * (size_t)bytes;
+                ::memcpy(valueElem, valueIn, (size_t)bytes);
+                valueIn += bytes;
+            }
+        }
+    }
+    return true;
+}
+
+static bool zeroKvRange(CPUKVCacheManager* cacheManager,
+                        int kvNumHead,
+                        int headDim,
+                        int bytes,
+                        int lPack,
+                        int hPack,
+                        int flashBlockKv,
+                        int startToken,
+                        int tokenCount) {
+    if (cacheManager == nullptr
+        || tokenCount <= 0
+        || kvNumHead <= 0
+        || headDim <= 0
+        || bytes <= 0) {
+        return false;
+    }
+    const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
+    const size_t keyStride0 = (size_t)ROUND_UP(headDim, lPack) * (size_t)hPack;
+    const size_t keyStride1 = (size_t)hPack * (size_t)lPack;
+    const size_t valueStride2 = (size_t)lPack * (size_t)hPack;
+    const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
+    const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
+    for (int h = 0; h < kvNumHead; ++h) {
+        auto* keyPtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfKey(h));
+        auto* valuePtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfValue(h));
+        if (keyPtr == nullptr || valuePtr == nullptr) {
+            return false;
+        }
+        for (int local = 0; local < tokenCount; ++local) {
+            const int seq = startToken + local;
+            const int seqOut = seq / hPack;
+            const int seqIn = seq % hPack;
+            const size_t keySeqBase = (size_t)seqOut * keyStride0 + (size_t)seqIn * (size_t)lPack;
+
+            const int seqInFlash = seq % safeFlashBlockKv;
+            const size_t valueInner = (size_t)(seq / safeFlashBlockKv) * valueStride0
+                + (size_t)(seqInFlash / lPack) * valueStride2
+                + (size_t)(seqInFlash % lPack);
+
+            for (int dim = 0; dim < headDim; ++dim) {
+                const size_t keyIndex = keySeqBase
+                    + (size_t)(dim / lPack) * keyStride1
+                    + (size_t)(dim % lPack);
+                auto* keyElem = keyPtr + keyIndex * (size_t)bytes;
+                ::memset(keyElem, 0, (size_t)bytes);
+
+                const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
+                    + (size_t)(dim % hPack) * (size_t)lPack
+                    + valueInner;
+                auto* valueElem = valuePtr + valueIndex * (size_t)bytes;
+                ::memset(valueElem, 0, (size_t)bytes);
+            }
+        }
+    }
+    return true;
+}
+
+static bool restoreLosslessBlockToKv(CPUKVCacheManager* cacheManager,
+                                     int kvNumHead,
+                                     int headDim,
+                                     int bytes,
+                                     int lPack,
+                                     int hPack,
+                                     int flashBlockKv,
+                                     int startToken,
+                                     int tokenCount,
+                                     uint64_t rawBytes,
+                                     uint64_t rawHash,
+                                     const std::vector<uint8_t>& keyBlob,
+                                     const std::vector<uint8_t>& valueBlob,
+                                     bool strictRoundtrip,
+                                     uint64_t& decodedBytes,
+                                     int64_t& decodeUs,
+                                     bool& fallbackUsed) {
+    decodedBytes = 0;
+    decodeUs = 0;
+    fallbackUsed = false;
+    if (cacheManager == nullptr || tokenCount <= 0) {
+        fallbackUsed = true;
+        return false;
+    }
+    if (keyBlob.empty() && valueBlob.empty()) {
+        fallbackUsed = true;
+        return false;
+    }
+
+    std::vector<uint8_t> keyDecoded;
+    std::vector<uint8_t> valueDecoded;
+    auto d0 = std::chrono::high_resolution_clock::now();
+    bool keyOk = true;
+    bool valueOk = true;
+    if (!keyBlob.empty()) {
+        if (bytes == 2) {
+            keyOk = decodeFp16GearPredictive(keyBlob.data(), keyBlob.size(), keyDecoded);
+        } else if (bytes == 4) {
+            keyOk = decodeFp32LanePredictive(keyBlob.data(), keyBlob.size(), keyDecoded);
+        } else {
+            keyOk = false;
+        }
+    }
+    if (!valueBlob.empty()) {
+        if (bytes == 2) {
+            valueOk = decodeFp16GearPredictive(valueBlob.data(), valueBlob.size(), valueDecoded);
+        } else if (bytes == 4) {
+            valueOk = decodeFp32LanePredictive(valueBlob.data(), valueBlob.size(), valueDecoded);
+        } else {
+            valueOk = false;
+        }
+    }
+    auto d1 = std::chrono::high_resolution_clock::now();
+    decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
+    if (!keyOk || !valueOk) {
+        fallbackUsed = true;
+        return false;
+    }
+
+    decodedBytes = static_cast<uint64_t>(keyDecoded.size() + valueDecoded.size());
+    if (decodedBytes != rawBytes) {
+        fallbackUsed = true;
+        return false;
+    }
+    if (strictRoundtrip) {
+        uint64_t decodedHash = fnv1a64(keyDecoded.data(), keyDecoded.size());
+        decodedHash = fnv1a64(valueDecoded.data(), valueDecoded.size(), decodedHash);
+        if (decodedHash != rawHash) {
+            fallbackUsed = true;
+            return false;
+        }
+    }
+    if (!scatterKvMergedRange(cacheManager,
+                              kvNumHead,
+                              headDim,
+                              bytes,
+                              lPack,
+                              hPack,
+                              flashBlockKv,
+                              startToken,
+                              tokenCount,
+                              keyDecoded,
+                              valueDecoded)) {
+        fallbackUsed = true;
+        return false;
+    }
+    return true;
+}
+
 ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
     auto gcore = static_cast<CPUBackend *>(backend())->functions();
     auto core = static_cast<CPUBackend*>(backend())->int8Functions();
@@ -989,6 +1216,57 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mScale /= q_scale;
     }
     int insertLen = seqLen;
+    const int preLayerCount = (mMeta != nullptr) ? ALIMAX(1, mMeta->layer_nums) : 1;
+    int preLayerIndex = 0;
+    if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
+        preLayerIndex = static_cast<int>(mH2OState->decodeLayerCursor % static_cast<int64_t>(preLayerCount));
+    }
+    const bool runtimeStoreMode = mMeta != nullptr
+        && mMeta->h2o_lossless_enable != 0
+        && mMeta->h2o_lossless_runtime_enable != 0
+        && mMeta->h2o_lossless_runtime_mode == 2;
+    if (runtimeStoreMode
+        && mKVCache
+        && mH2OState != nullptr
+        && preLayerIndex >= 0
+        && preLayerIndex < (int)mH2OState->layerStates.size()) {
+        auto& restoreState = mH2OState->layerStates[preLayerIndex];
+        const int flashBlockKv = ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv());
+        const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
+        for (auto& block : restoreState.losslessBlocks) {
+            if (!block.rawDropped) {
+                continue;
+            }
+            uint64_t decodedBytes = 0;
+            int64_t decodeUs = 0;
+            bool fallbackUsed = false;
+            const bool restored = restoreLosslessBlockToKv(
+                mKVCacheManager.get(),
+                mKvNumHead,
+                mHeadDim,
+                mBytes,
+                lP,
+                hP,
+                flashBlockKv,
+                block.startToken,
+                block.tokenCount,
+                block.rawBytes,
+                block.rawHash,
+                block.keyBlob,
+                block.valueBlob,
+                strictRoundtrip,
+                decodedBytes,
+                decodeUs,
+                fallbackUsed);
+            restoreState.losslessDecompressUs += decodeUs;
+            if (restored) {
+                restoreState.losslessDecompressedBytes += decodedBytes;
+            } else if (fallbackUsed) {
+                restoreState.losslessFallbackCount += 1;
+            }
+            block.rawDropped = false;
+        }
+    }
 
     if (mKVCache && mMeta != nullptr) {
         // Apply previous-step H2O compact plan before touching KV cache in this step.
@@ -1913,7 +2191,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
         bool applyLossless = false;
         int losslessTokenBudget = kvSeqLen;
-        const bool runtimeProbeMode = (mMeta->h2o_lossless_runtime_mode == 0);
+        const int runtimeMode = mMeta->h2o_lossless_runtime_mode;
+        const bool runtimeProbeMode = (runtimeMode == 0);
+        const bool runtimeStoreModeLocal = (runtimeMode == 2);
         if (mMeta->h2o_lossless_enable != 0
             && mMeta->h2o_lossless_codec == 1
             && mMeta->h2o_lossless_runtime_enable != 0) {
@@ -2018,13 +2298,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     block.rawBytes = stats.rawBytes;
                     block.compressedBytes = stats.compressedBytes;
                     block.rawHash = stats.rawHash;
-                    block.decodedOnce = false;
+                    block.decodedOnce = runtimeStoreModeLocal;
                     block.keyBlob.swap(stats.keyBlob);
                     block.valueBlob.swap(stats.valueBlob);
                     layerState.losslessBlocks.emplace_back(std::move(block));
 
                     const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
-                    if (decodeCacheBlocks > 0) {
+                    if (decodeCacheBlocks > 0 && !runtimeStoreModeLocal) {
                         while ((int)layerState.losslessBlocks.size() > decodeCacheBlocks) {
                             layerState.losslessBlocks.erase(layerState.losslessBlocks.begin());
                         }
@@ -2037,10 +2317,28 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                     mH2OState->globalLosslessQueueDepthPeak =
                         ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterPush);
+                    if (runtimeStoreModeLocal && !layerState.losslessBlocks.empty()) {
+                        auto& stored = layerState.losslessBlocks.back();
+                        if (zeroKvRange(mKVCacheManager.get(),
+                                        mKvNumHead,
+                                        mHeadDim,
+                                        mBytes,
+                                        lP,
+                                        hP,
+                                        ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
+                                        stored.startToken,
+                                        stored.tokenCount)) {
+                            stored.rawDropped = true;
+                        } else {
+                            layerState.losslessFallbackCount += 1;
+                        }
+                    }
                 }
-                // Decode one block right after enqueue so single-update runs still
-                // report real runtime decompression cost.
-                decodeOnePendingLosslessBlock(layerState);
+                if (!runtimeStoreModeLocal) {
+                    // Decode one block right after enqueue so single-update runs still
+                    // report real runtime decompression cost.
+                    decodeOnePendingLosslessBlock(layerState);
+                }
                 layerState.losslessRawBytes += stats.rawBytes;
                 layerState.losslessCompressedBytes += stats.compressedBytes;
                 layerState.losslessDecompressedBytes += stats.decompressedBytes;
@@ -2076,7 +2374,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             pendingAfterUpdate += 1;
                         }
                     }
-                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d zstd=%d\n",
+                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d mode=%d zstd=%d\n",
                               layerIndex,
                               kvSeqLen,
                               evalStartToken,
@@ -2092,6 +2390,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                               stats.fallbackUsed ? 1 : 0,
                               stats.backpressureSkipped ? 1 : 0,
                               pendingAfterUpdate,
+                              runtimeMode,
                               zstdReady ? 1 : 0);
                 }
             }

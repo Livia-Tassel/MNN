@@ -52,7 +52,7 @@ struct KVMeta {
     int h2o_lossless_scope = 1; // 0:none 1:front_n 2:h2o_kept
     int h2o_lossless_front_n = 2;
     int h2o_lossless_runtime_enable = 0;
-    int h2o_lossless_runtime_mode = 0; // 0:probe(sample), 1:full
+    int h2o_lossless_runtime_mode = 0; // 0:probe(sample), 1:full, 2:store(experimental)
     int h2o_lossless_block_tokens = 128;
     int h2o_lossless_hot_recent_tokens = 256;
     int h2o_lossless_hot_sink_tokens = 16;
