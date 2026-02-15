@@ -522,6 +522,12 @@ public:
     int kv_lossless_kept_sample_token_interval() const {
         return config_.value("kv_lossless_kept_sample_token_interval", 1);
     }
+    int kv_lossless_front_sample_token_interval() const {
+        return config_.value("kv_lossless_front_sample_token_interval", 1);
+    }
+    bool kv_lossless_store_disable_front() const {
+        return config_.value("kv_lossless_store_disable_front", false);
+    }
     std::string kv_lossless_codec_runtime() const {
         return config_.value("kv_lossless_codec_runtime", "fp16_gear_predictive_v3");
     }

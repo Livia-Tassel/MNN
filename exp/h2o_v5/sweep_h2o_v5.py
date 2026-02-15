@@ -80,6 +80,8 @@ def main():
         str(preset.get("kv_lossless_kept_sample_layers", 1)),
         "--kv-lossless-kept-sample-token-interval",
         str(preset.get("kv_lossless_kept_sample_token_interval", 2)),
+        "--kv-lossless-front-sample-token-interval",
+        str(preset.get("kv_lossless_front_sample_token_interval", 1)),
         "--kv-lossless-runtime-mode",
         str(preset.get("kv_lossless_runtime_mode", "full")),
         "--kv-lossless-codec-runtime",
@@ -99,6 +101,8 @@ def main():
         cmd.append("--kv-lossless-enable")
     if preset.get("kv_lossless_runtime_enable", False):
         cmd.append("--kv-lossless-runtime-enable")
+    if preset.get("kv_lossless_store_disable_front", False):
+        cmd.append("--kv-lossless-store-disable-front")
     codec = preset.get("kv_lossless_codec", "none")
     cmd.extend(["--kv-lossless-codec", str(codec)])
     if preset.get("kv_lossless_strict_roundtrip_check", False):

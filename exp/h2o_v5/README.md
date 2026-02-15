@@ -9,6 +9,8 @@ v5 focuses on finishing the optional target:
 - Lossless scope: `front_n_and_h2o_kept`
 - Runtime mode: `full`
 - Kept sampling: `layers=1`, `token_interval=2`
+- Front-layer sampling: `front_token_interval=1` (`store` auto defaults to `2`)
+- Store-mode front handling: `store_disable_front=1` by default in `store` runtime script path
 - Strict runtime gates enabled by default in runtime/M3 scripts:
   - `MAX_LOSSLESS_QUEUE_PEAK=8`
   - `MAX_LOSSLESS_FALLBACK=0`
@@ -46,13 +48,35 @@ KV_LOSSLESS_RUNTIME_MODE=store bash exp/h2o_v5/test_v5_runtime.sh
 MAX_LOSSLESS_DECOMP_US=30000 bash exp/h2o_v5/test_v5_runtime.sh
 ```
 
+### 5) Target-3 full coverage run (all kept layers, every decode step)
+```bash
+python3 exp/h2o_v5/sweep_h2o_v5.py \
+  --llm-bench ./build/llm_bench \
+  --base-config /path/to/model/config.json \
+  --preset exp/h2o_v5/configs/target_joint_scope_v5_full_coverage.json \
+  --out-dir exp/h2o_v5/out_full_coverage_$(date +%Y%m%d_%H%M%S)
+```
+
 ## Presets
 - `configs/target_core_gate_v5.json`: recommended baseline for core gate
 - `configs/target_joint_scope_v5.json`: balanced joint-scope full mode
 - `configs/target_joint_scope_v5_aggressive.json`: denser sampling (higher overhead)
+- `configs/target_joint_scope_v5_full_coverage.json`: full kept coverage (`kept_sample_layers=0`, `kept_sample_token_interval=0`)
 - `configs/target_store_v5.json`: store-mode joint scope
 - `configs/target_ratio_v5.json`: ratio-oriented sweep
 - `configs/target_speed_v5.json`: speed-oriented sweep
+
+## New Runtime Knobs
+- `kv_lossless_kept_sample_layers`:
+  - `>0`: sample first N kept layers
+  - `0`: sample all kept layers (full coverage)
+- `kv_lossless_kept_sample_token_interval`:
+  - `>1`: sample every N decode-token steps
+  - `0` or `1`: sample every decode step
+- `kv_lossless_front_sample_token_interval`:
+  - control front-layer sampling cadence in `full/store` modes
+- `kv_lossless_store_disable_front`:
+  - when true and runtime mode is `store`, front_n lossless is skipped to reduce restore overhead
 
 ## Gate Definition
 - `lossy_pass`: best runtime `h2o_lossy >= 3.0`
@@ -67,4 +91,3 @@ MAX_LOSSLESS_DECOMP_US=30000 bash exp/h2o_v5/test_v5_runtime.sh
 - `test_v5_m3.sh` completes with all runs `overall_pass=true`
 - `joint_full` is stable across 3 runs
 - `joint_store` smoke passes with strict queue/fallback gates
-

@@ -56,8 +56,10 @@ struct KVMeta {
     int h2o_lossless_block_tokens = 128;
     int h2o_lossless_hot_recent_tokens = 256;
     int h2o_lossless_hot_sink_tokens = 16;
-    int h2o_lossless_kept_sample_layers = 1;
-    int h2o_lossless_kept_sample_token_interval = 1;
+    int h2o_lossless_kept_sample_layers = 1; // <=0 means sample all kept layers
+    int h2o_lossless_kept_sample_token_interval = 1; // <=1 means sample every decode step
+    int h2o_lossless_front_sample_token_interval = 1; // <=1 means sample every decode step
+    int h2o_lossless_store_disable_front = 0;
     std::string h2o_lossless_codec_runtime = "fp16_gear_predictive_v3";
     std::string h2o_lossless_predictors_k = "raw,delta_seq,xor_seq,pair_delta";
     std::string h2o_lossless_predictors_v = "raw,delta_seq,xor_seq";

@@ -2215,18 +2215,40 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 // Prefer full front-layer budget; for deeper H2O-kept layers use post-lossy keep budget.
                 losslessTokenBudget = inFrontLosslessRange ? kvSeqLen : finalKeepTokensForLayer;
             }
+            if (runtimeStoreModeLocal && mMeta->h2o_lossless_store_disable_front != 0 && inFrontLosslessRange) {
+                if (mMeta->h2o_lossless_scope == 1) {
+                    applyLossless = false;
+                } else if (mMeta->h2o_lossless_scope == 3) {
+                    applyLossless = inH2OKeptLosslessRange;
+                    if (applyLossless) {
+                        losslessTokenBudget = finalKeepTokensForLayer;
+                    }
+                }
+            }
+            if (applyLossless && inFrontLosslessRange && !runtimeProbeMode) {
+                const int frontSampleIntervalRaw = mMeta->h2o_lossless_front_sample_token_interval;
+                if (frontSampleIntervalRaw > 1) {
+                    const int64_t tokenStep = std::max<int64_t>(1, mH2OState->globalTokenStep);
+                    const bool tokenSampled = ((tokenStep - 1) % (int64_t)frontSampleIntervalRaw) == 0;
+                    applyLossless = tokenSampled;
+                }
+            }
         }
         if (applyLossless && runtimeMode == 1
             && (mMeta->h2o_lossless_scope == 2 || mMeta->h2o_lossless_scope == 3)) {
             const bool inFrontLosslessRange = layerIndex < ALIMAX(0, mMeta->h2o_lossless_front_n);
             const bool inH2OKeptLosslessRange = h2oLayerInRange;
             if (inH2OKeptLosslessRange && !(mMeta->h2o_lossless_scope == 3 && inFrontLosslessRange)) {
-                const int keptSampleLayers = ALIMAX(1, mMeta->h2o_lossless_kept_sample_layers);
-                const int keptSampleTokenInterval = ALIMAX(1, mMeta->h2o_lossless_kept_sample_token_interval);
+                const int keptSampleLayers = mMeta->h2o_lossless_kept_sample_layers;
+                const int keptSampleTokenInterval = mMeta->h2o_lossless_kept_sample_token_interval;
                 const int keptLayerOffset = layerIndex - h2oLayerStart;
-                const bool layerSampled = keptLayerOffset >= 0 && keptLayerOffset < keptSampleLayers;
+                const bool layerSampled = (keptSampleLayers <= 0)
+                    ? (keptLayerOffset >= 0)
+                    : (keptLayerOffset >= 0 && keptLayerOffset < keptSampleLayers);
                 const int64_t tokenStep = std::max<int64_t>(1, mH2OState->globalTokenStep);
-                const bool tokenSampled = ((tokenStep - 1) % (int64_t)keptSampleTokenInterval) == 0;
+                const bool tokenSampled = (keptSampleTokenInterval <= 1)
+                    ? true
+                    : (((tokenStep - 1) % (int64_t)keptSampleTokenInterval) == 0);
                 // Full-mode deep kept range can be tuned by kept-layer count and decode-step interval.
                 // This preserves front-layer signal while capping decode overhead in deep layers.
                 applyLossless = layerSampled && tokenSampled;

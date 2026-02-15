@@ -86,6 +86,8 @@ def main():
     parser.add_argument("--kv-lossless-hot-sink-tokens", type=int, default=16)
     parser.add_argument("--kv-lossless-kept-sample-layers", type=int, default=1)
     parser.add_argument("--kv-lossless-kept-sample-token-interval", type=int, default=2)
+    parser.add_argument("--kv-lossless-front-sample-token-interval", type=int, default=1)
+    parser.add_argument("--kv-lossless-store-disable-front", action="store_true")
     parser.add_argument("--kv-lossless-codec-runtime", default="fp16_gear_predictive_v3")
     parser.add_argument("--kv-lossless-predictors-k", default="raw,delta_seq,xor_seq,pair_delta")
     parser.add_argument("--kv-lossless-predictors-v", default="raw,delta_seq,xor_seq")
@@ -182,6 +184,8 @@ def main():
                 "kv_lossless_hot_sink_tokens": int(args.kv_lossless_hot_sink_tokens),
                 "kv_lossless_kept_sample_layers": int(args.kv_lossless_kept_sample_layers),
                 "kv_lossless_kept_sample_token_interval": int(args.kv_lossless_kept_sample_token_interval),
+                "kv_lossless_front_sample_token_interval": int(args.kv_lossless_front_sample_token_interval),
+                "kv_lossless_store_disable_front": bool(args.kv_lossless_store_disable_front),
                 "kv_lossless_codec_runtime": args.kv_lossless_codec_runtime,
                 "kv_lossless_predictors_k": args.kv_lossless_predictors_k,
                 "kv_lossless_predictors_v": args.kv_lossless_predictors_v,
@@ -256,6 +260,8 @@ def main():
                 "kv_lossless_hot_sink_tokens": int(args.kv_lossless_hot_sink_tokens),
                 "kv_lossless_kept_sample_layers": int(args.kv_lossless_kept_sample_layers),
                 "kv_lossless_kept_sample_token_interval": int(args.kv_lossless_kept_sample_token_interval),
+                "kv_lossless_front_sample_token_interval": int(args.kv_lossless_front_sample_token_interval),
+                "kv_lossless_store_disable_front": bool(args.kv_lossless_store_disable_front),
                 "kv_lossless_codec_runtime": args.kv_lossless_codec_runtime,
                 "kv_lossless_predictors_k": args.kv_lossless_predictors_k,
                 "kv_lossless_predictors_v": args.kv_lossless_predictors_v,

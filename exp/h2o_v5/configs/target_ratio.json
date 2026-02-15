@@ -24,5 +24,7 @@
   "kv_lossless_hot_recent_tokens": 256,
   "kv_lossless_hot_sink_tokens": 16,
   "kv_lossless_kept_sample_layers": 1,
-  "kv_lossless_kept_sample_token_interval": 2
+  "kv_lossless_kept_sample_token_interval": 2,
+  "kv_lossless_front_sample_token_interval": 1,
+  "kv_lossless_store_disable_front": false
 }
