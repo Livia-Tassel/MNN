@@ -525,7 +525,7 @@ else:
     print("  PASS: all rows are structurally capable of reaching lossy target.")
 PY
 
-# ── Step 5: Validate Fix 6 — groupedStep uses blockStep ──────────────────
+# ── Step 5: Validate Fix 6 — groupedStep uses configured token span ──────
 echo ""
 echo "==== Step 5: Validating Fix 6 — groupedStep ===="
 LOSSLESS_LINES=""
@@ -555,12 +555,20 @@ echo "${LOSSLESS_LINES}" | head -3
 set +e
 STEP5_TMP="${TMPDIR}/step5_lossless_lines.txt"
 printf "%s\n" "${LOSSLESS_LINES}" > "${STEP5_TMP}"
-STEP5_OUT=$(python3 - "${KV_LOSSLESS_BLOCK_TOKENS}" "${STEP5_TMP}" <<'PY'
+STEP5_OUT=$(python3 - \
+  "${KV_LOSSLESS_BLOCK_TOKENS}" \
+  "${KV_LOSSLESS_RUNTIME_MODE}" \
+  "${KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS}" \
+  "${KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS}" \
+  "${STEP5_TMP}" <<'PY'
 import re
 import sys
 
 block_tokens = int(sys.argv[1])
-path = sys.argv[2]
+runtime_mode = sys.argv[2]
+store_bootstrap_tokens = int(sys.argv[3])
+store_grouped_step_tokens = int(sys.argv[4])
+path = sys.argv[5]
 lines = [
     ln.strip()
     for ln in open(path, "r", encoding="utf-8", errors="ignore").read().splitlines()
@@ -572,10 +580,18 @@ upd_re = re.compile(r"\bupdates=(\d+)\b")
 start_re = re.compile(r"\bstart=(\d+)\b")
 
 tok_192 = 0
-tok_block = 0
 periodic = 0
 bootstrap_like = 0
 start_pos = 0
+periodic_expected = 0
+bootstrap_expected = 0
+
+if runtime_mode == "store":
+    expected_bootstrap = store_bootstrap_tokens if store_bootstrap_tokens > 0 else block_tokens
+    expected_periodic = store_grouped_step_tokens if store_grouped_step_tokens > 0 else block_tokens
+else:
+    expected_bootstrap = block_tokens
+    expected_periodic = block_tokens
 
 for ln in lines:
     m_tok = tok_re.search(ln)
@@ -586,16 +602,20 @@ for ln in lines:
     start = int(m_start.group(1)) if m_start else -1
     if tok == 192:
         tok_192 += 1
-    if tok == block_tokens:
-        tok_block += 1
     if upd >= 2:
         periodic += 1
+        if tok == expected_periodic:
+            periodic_expected += 1
     elif upd == 1:
         bootstrap_like += 1
+        if tok == expected_bootstrap:
+            bootstrap_expected += 1
     if start > 0:
         start_pos += 1
 
-print(f"  tokens={block_tokens} count: {tok_block}")
+print(f"  mode={runtime_mode}")
+print(f"  expected bootstrap tokens={expected_bootstrap} count: {bootstrap_expected}")
+print(f"  expected periodic tokens={expected_periodic} count: {periodic_expected}")
 print(f"  tokens=192 count: {tok_192}")
 print(f"  periodic(updates>=2) count: {periodic}")
 print(f"  bootstrap-like(updates=1) count: {bootstrap_like}")
@@ -604,16 +624,22 @@ print(f"  start>0 count: {start_pos}")
 if tok_192 > 0:
     print("  FAIL: hardcoded 192 grouping still present")
     sys.exit(1)
-if tok_block > 0:
+if periodic > 0 and periodic_expected == 0:
+    print(
+        f"  FAIL: periodic updates detected but none used expected periodic tokens={expected_periodic}"
+    )
+    sys.exit(1)
+if bootstrap_like > 0 and bootstrap_expected == 0:
+    print(
+        f"  WARN: bootstrap updates detected but none used expected bootstrap tokens={expected_bootstrap}"
+    )
+if periodic > 0:
     print("  PASS")
     sys.exit(0)
-if periodic > 0:
-    print(f"  FAIL: periodic updates detected but none used tokens={block_tokens}")
-    sys.exit(1)
 print("  INFO: only bootstrap-like updates observed (updates=1).")
 print("        With hot-window clipping, bootstrap start may be >0 (e.g. start=hot_sink).")
 print("        This run did not reach periodic grouped updates; skipping strict blockStep assertion.")
-print("        To force strict check, increase GENS or reduce kv_lossless_block_tokens.")
+print("        To force strict check, increase GENS or reduce grouped-step token span.")
 print("  PASS")
 sys.exit(0)
 PY

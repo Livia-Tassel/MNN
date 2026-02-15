@@ -25,6 +25,7 @@ v5 focuses on finishing the optional target:
 - `analyze_h2o_v5.py`: runtime + offline merge and gate summary
 - `test_v5_runtime.sh`: one-command strict runtime validation
 - `test_v5_m3.sh`: one-command core gate pack (`joint_full x3` + `joint_store x1`)
+- `test_v5_final.sh`: one-command final acceptance (`full + store + full_coverage + M3`)
 - `run_full_eval.sh`: offline + gate pipeline with optional strict runtime gates
 
 ## Recommended Commands
@@ -56,6 +57,20 @@ python3 exp/h2o_v5/sweep_h2o_v5.py \
   --base-config /path/to/model/config.json \
   --preset exp/h2o_v5/configs/target_joint_scope_v5_full_coverage.json \
   --out-dir exp/h2o_v5/out_full_coverage_$(date +%Y%m%d_%H%M%S)
+```
+
+### 6) One-command final acceptance (recommended before closing v5)
+```bash
+bash exp/h2o_v5/test_v5_final.sh
+```
+
+Optional strictness knobs:
+```bash
+FULL_DECOMP_BUDGET_US=30000 \
+STORE_DECOMP_BUDGET_US=70000 \
+COVERAGE_DECOMP_BUDGET_US=70000 \
+M3_DECOMP_BUDGET_US=70000 \
+bash exp/h2o_v5/test_v5_final.sh
 ```
 
 ## Presets
