@@ -508,15 +508,17 @@ echo "  Sample lines:"
 echo "${LOSSLESS_LINES}" | head -3
 
 set +e
-STEP5_OUT=$(LOSSLESS_LINES="${LOSSLESS_LINES}" python3 - "${KV_LOSSLESS_BLOCK_TOKENS}" <<'PY'
-import os
+STEP5_TMP="${TMPDIR}/step5_lossless_lines.txt"
+printf "%s\n" "${LOSSLESS_LINES}" > "${STEP5_TMP}"
+STEP5_OUT=$(python3 - "${KV_LOSSLESS_BLOCK_TOKENS}" "${STEP5_TMP}" <<'PY'
 import re
 import sys
 
 block_tokens = int(sys.argv[1])
+path = sys.argv[2]
 lines = [
     ln.strip()
-    for ln in os.environ.get("LOSSLESS_LINES", "").splitlines()
+    for ln in open(path, "r", encoding="utf-8", errors="ignore").read().splitlines()
     if "[H2O-LOSSLESS]" in ln
 ]
 
@@ -572,6 +574,7 @@ sys.exit(0)
 PY
 )
 STEP5_RC=$?
+rm -f "${STEP5_TMP}"
 set -e
 echo "${STEP5_OUT}"
 if [[ ${STEP5_RC} -ne 0 ]]; then
