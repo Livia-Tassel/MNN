@@ -23,11 +23,25 @@ This folder is the v4 experiment kit for the M1 milestone:
 - `offline_lossless_fp16.py`: offline lossless eval (`upper_bound` / `online_sim`)
 - `analyze_h2o_v4.py`: merge runtime + offline and produce quality gate summary
 - `test_v4_runtime.sh`: one-command validation for v4 runtime path
+- `test_v4_m3.sh`: one-command multi-run M3 pack (joint full + store, consolidated report)
 - `run_full_eval.sh`: one-command offline+gate pipeline
 
 ## One-Command v4 Validation
 ```bash
 bash exp/h2o_v4/test_v4_runtime.sh
+```
+
+## One-Command M3 Pack
+```bash
+bash exp/h2o_v4/test_v4_m3.sh
+```
+Useful overrides:
+```bash
+FULL_RUNS=3 STORE_RUNS=1 \
+KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL=2 \
+MAX_LOSSLESS_QUEUE_PEAK=8 \
+MAX_LOSSLESS_FALLBACK=0 \
+bash exp/h2o_v4/test_v4_m3.sh
 ```
 
 Validation coverage:
