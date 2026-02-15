@@ -187,6 +187,7 @@ struct TestInstance {
     std::vector<double>      h2oLosslessCompMB;
     std::vector<double>      h2oLosslessCompUs;
     std::vector<double>      h2oLosslessDecompUs;
+    std::vector<double>      h2oLosslessQueuePeak;
     std::vector<double>      h2oLosslessFallback;
     int                      backend;
     int                      precision;
@@ -244,6 +245,7 @@ struct TestInstance {
             || field == "h2o_lossless_comp_mb"
             || field == "h2o_lossless_comp_us"
             || field == "h2o_lossless_decomp_us"
+            || field == "h2o_lossless_queue_peak"
             || field == "h2o_lossless_fallback") {
             return FLOAT;
         }
@@ -375,6 +377,7 @@ struct markdownPrinter : public Printer {
             fields.emplace_back("h2o_lossless_comp_mb");
             fields.emplace_back("h2o_lossless_comp_us");
             fields.emplace_back("h2o_lossless_decomp_us");
+            fields.emplace_back("h2o_lossless_queue_peak");
             fields.emplace_back("h2o_lossless_fallback");
         }
         if (tp.loadTime == "true") {
@@ -468,6 +471,9 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "h2o_lossless_decomp_us") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecompUs), t.getStdevUs(t.h2oLosslessDecompUs));
+                value = buf;
+            } else if (field == "h2o_lossless_queue_peak") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessQueuePeak), t.getStdevUs(t.h2oLosslessQueuePeak));
                 value = buf;
             } else if (field == "h2o_lossless_fallback") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessFallback), t.getStdevUs(t.h2oLosslessFallback));
@@ -722,6 +728,12 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.h2oLosslessDecompUs));
                 writer.Key("h2o_lossless_decomp_us_std");
                 writer.Double(inst.getStdevUs(inst.h2oLosslessDecompUs));
+            }
+            if (!inst.h2oLosslessQueuePeak.empty()) {
+                writer.Key("h2o_lossless_queue_peak");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessQueuePeak));
+                writer.Key("h2o_lossless_queue_peak_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessQueuePeak));
             }
             if (!inst.h2oLosslessFallback.empty()) {
                 writer.Key("h2o_lossless_fallback");
@@ -1410,6 +1422,7 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessCompMB.push_back((double)context->h2o_lossless_compressed_bytes / 1024.0 / 1024.0);
                     t.h2oLosslessCompUs.push_back((double)context->h2o_lossless_compress_us);
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
+                    t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
                 }
             }
@@ -1452,6 +1465,7 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessCompMB.push_back((double)context->h2o_lossless_compressed_bytes / 1024.0 / 1024.0);
                     t.h2oLosslessCompUs.push_back((double)context->h2o_lossless_compress_us);
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
+                    t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
                 }
             }

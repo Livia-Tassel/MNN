@@ -39,6 +39,7 @@ Validation coverage:
   - `h2o_lossless_comp_mb > 0`
   - `h2o_lossless_comp_us > 0`
   - `h2o_lossless_decomp_us > 0`
+  - `h2o_lossless_queue_peak` (runtime queue observability)
 - Grouped-step check (`tokens != 192`, expect block-step behavior).
 - Offline upper/online-sim + quality gate.
 
