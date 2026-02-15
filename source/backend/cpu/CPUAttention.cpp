@@ -2306,12 +2306,20 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
             const int blockStep = ALIMAX(1, mMeta->h2o_lossless_block_tokens);
-            const int groupedStep = blockStep;
+            const int storeGroupedStepCfg = ALIMAX(0, mMeta->h2o_lossless_store_grouped_step_tokens);
+            const int groupedStep = runtimeStoreModeLocal
+                ? ALIMAX(1, storeGroupedStepCfg > 0 ? storeGroupedStepCfg : blockStep)
+                : blockStep;
             const int64_t losslessStep = mH2OState->globalTokenStep;
             const int tokenBudgetGrowth = coldTokenBudget - layerState.losslessLastTokenBudget;
             const bool intervalReady = (losslessStep - layerState.losslessLastStep >= updateInterval);
-            const int runtimeBootstrapSampleCap = runtimeProbeMode ? 32 : blockStep;
-            const int bootstrapSampleTokens = ALIMAX(1, ALIMIN(blockStep, runtimeBootstrapSampleCap));
+            const int storeBootstrapCfg = ALIMAX(0, mMeta->h2o_lossless_store_bootstrap_tokens);
+            const int storeBootstrapTokens = ALIMAX(1, storeBootstrapCfg > 0 ? storeBootstrapCfg : blockStep);
+            const int runtimeBootstrapSampleCap = runtimeProbeMode
+                ? 32
+                : (runtimeStoreModeLocal ? storeBootstrapTokens : blockStep);
+            const int bootstrapSampleBase = runtimeStoreModeLocal ? storeBootstrapTokens : blockStep;
+            const int bootstrapSampleTokens = ALIMAX(1, ALIMIN(bootstrapSampleBase, runtimeBootstrapSampleCap));
 
             int evalTokenCount = 0;
             int evalStartToken = ALIMAX(layerState.losslessLastTokenBudget, coldBeginToken);

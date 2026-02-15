@@ -11,6 +11,7 @@ v5 focuses on finishing the optional target:
 - Kept sampling: `layers=1`, `token_interval=2`
 - Front-layer sampling: `front_token_interval=1` (`store` auto defaults to `2`)
 - Store-mode front handling: `store_disable_front=1` by default in `store` runtime script path
+- Store-mode throttle: `store_bootstrap_tokens=32`, `store_grouped_step_tokens=256`
 - Strict runtime gates enabled by default in runtime/M3 scripts:
   - `MAX_LOSSLESS_QUEUE_PEAK=8`
   - `MAX_LOSSLESS_FALLBACK=0`
@@ -77,6 +78,10 @@ python3 exp/h2o_v5/sweep_h2o_v5.py \
   - control front-layer sampling cadence in `full/store` modes
 - `kv_lossless_store_disable_front`:
   - when true and runtime mode is `store`, front_n lossless is skipped to reduce restore overhead
+- `kv_lossless_store_bootstrap_tokens`:
+  - controls first-store update token span (smaller helps short decode latency)
+- `kv_lossless_store_grouped_step_tokens`:
+  - controls follow-up store grouped update step (larger reduces update frequency)
 
 ## Gate Definition
 - `lossy_pass`: best runtime `h2o_lossy >= 3.0`

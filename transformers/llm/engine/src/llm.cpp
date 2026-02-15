@@ -112,6 +112,8 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     meta->h2o_lossless_kept_sample_token_interval = ALIMAX(0, cfg->kv_lossless_kept_sample_token_interval());
     meta->h2o_lossless_front_sample_token_interval = ALIMAX(0, cfg->kv_lossless_front_sample_token_interval());
     meta->h2o_lossless_store_disable_front = cfg->kv_lossless_store_disable_front() ? 1 : 0;
+    meta->h2o_lossless_store_bootstrap_tokens = ALIMAX(0, cfg->kv_lossless_store_bootstrap_tokens());
+    meta->h2o_lossless_store_grouped_step_tokens = ALIMAX(0, cfg->kv_lossless_store_grouped_step_tokens());
     meta->h2o_lossless_codec_runtime = cfg->kv_lossless_codec_runtime();
     meta->h2o_lossless_predictors_k = cfg->kv_lossless_predictors_k();
     meta->h2o_lossless_predictors_v = cfg->kv_lossless_predictors_v();

@@ -528,6 +528,12 @@ public:
     bool kv_lossless_store_disable_front() const {
         return config_.value("kv_lossless_store_disable_front", false);
     }
+    int kv_lossless_store_bootstrap_tokens() const {
+        return config_.value("kv_lossless_store_bootstrap_tokens", 32);
+    }
+    int kv_lossless_store_grouped_step_tokens() const {
+        return config_.value("kv_lossless_store_grouped_step_tokens", 256);
+    }
     std::string kv_lossless_codec_runtime() const {
         return config_.value("kv_lossless_codec_runtime", "fp16_gear_predictive_v3");
     }
