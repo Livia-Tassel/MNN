@@ -93,6 +93,10 @@ struct KVMeta {
     int64_t h2o_lossless_decompress_us = 0;
     int64_t h2o_lossless_queue_depth_peak = 0;
     int64_t h2o_lossless_fallback_count = 0;
+    int64_t h2o_lossless_async_queue_peak = 0;
+    int64_t h2o_lossless_async_wait_us = 0;
+    int64_t h2o_lossless_decode_cache_hit = 0;
+    int64_t h2o_lossless_decode_cache_miss = 0;
     int h2o_last_evict_tokens = 0;
     int h2o_total_evict_tokens = 0;
 
