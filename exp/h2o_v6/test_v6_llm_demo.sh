@@ -99,7 +99,48 @@ candidate_cfg = Path(sys.argv[3])
 
 obj = json.loads(base_cfg.read_text(encoding="utf-8"))
 
+
+def normalize_base_dir_and_paths(cfg_obj, cfg_path):
+    model_cfg_dir = cfg_path.resolve().parent
+    raw_base_dir = cfg_obj.get("base_dir", "")
+    if isinstance(raw_base_dir, str) and raw_base_dir:
+        base_dir_path = Path(raw_base_dir)
+        if not base_dir_path.is_absolute():
+            base_dir_path = (model_cfg_dir / base_dir_path).resolve()
+        else:
+            base_dir_path = base_dir_path.resolve()
+    else:
+        base_dir_path = model_cfg_dir
+
+    base_dir_str = os.fspath(base_dir_path)
+    if not base_dir_str.endswith(("/", "\\")):
+        base_dir_str += "/"
+    cfg_obj["base_dir"] = base_dir_str
+
+    def normalize_field(key):
+        raw = cfg_obj.get(key, "")
+        if not isinstance(raw, str) or not raw:
+            return
+        p = Path(raw)
+        if p.is_absolute():
+            resolved = p.resolve()
+        else:
+            resolved = (base_dir_path / p).resolve()
+        rel = os.path.relpath(os.fspath(resolved), os.fspath(base_dir_path))
+        cfg_obj[key] = rel.replace("\\", "/")
+
+    for key in (
+        "llm_config",
+        "llm_model",
+        "llm_weight",
+        "embedding_file",
+        "tokenizer_file",
+        "context_file",
+    ):
+        normalize_field(key)
+
 baseline = dict(obj)
+normalize_base_dir_and_paths(baseline, base_cfg)
 baseline.update({
     "kv_h2o_enable": False,
     "kv_lossless_enable": False,
@@ -123,6 +164,7 @@ def getb(name, default):
     return v not in ("0", "false", "False", "")
 
 candidate = dict(obj)
+normalize_base_dir_and_paths(candidate, base_cfg)
 candidate.update({
     "kv_h2o_enable": True,
     "kv_h2o_layer_start": geti("H2O_LAYER_START", 2),
