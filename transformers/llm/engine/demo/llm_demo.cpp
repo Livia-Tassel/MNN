@@ -226,28 +226,32 @@ static int ceval(Llm* llm, const std::vector<std::string>& lines, std::string fi
     return 0;
 }
 
-static int eval(Llm* llm, std::string prompt_file, int max_token_number, const std::string& metrics_jsonl) {
+static int eval(Llm* llm, std::string prompt_file, int max_token_number, const std::string& metrics_jsonl, bool prompt_file_as_whole) {
     std::cout << "prompt file is " << prompt_file << std::endl;
     std::ifstream prompt_fs(prompt_file);
     std::vector<std::string> prompts;
     std::string prompt;
-//#define LLM_DEMO_ONELINE
-#ifdef LLM_DEMO_ONELINE
-    std::ostringstream tempOs;
-    tempOs << prompt_fs.rdbuf();
-    prompt = tempOs.str();
-    prompts = {prompt};
-#else
-    while (std::getline(prompt_fs, prompt)) {
-        if (prompt.empty()) {
-            continue;
-        }
-        if (prompt.back() == '\r') {
+    if (prompt_file_as_whole) {
+        std::ostringstream tempOs;
+        tempOs << prompt_fs.rdbuf();
+        prompt = tempOs.str();
+        while (!prompt.empty() && (prompt.back() == '\n' || prompt.back() == '\r')) {
             prompt.pop_back();
         }
-        prompts.push_back(prompt);
+        if (!prompt.empty()) {
+            prompts = {prompt};
+        }
+    } else {
+        while (std::getline(prompt_fs, prompt)) {
+            if (prompt.empty()) {
+                continue;
+            }
+            if (prompt.back() == '\r') {
+                prompt.pop_back();
+            }
+            prompts.push_back(prompt);
+        }
     }
-#endif
     prompt_fs.close();
     if (prompts.empty()) {
         return 1;
@@ -321,6 +325,7 @@ int main(int argc, const char* argv[]) {
         metrics_jsonl = env_metrics;
     }
     bool disable_thinking = false;
+    bool prompt_file_as_whole = false;
     for (int i = 4; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg.rfind("--metrics-jsonl=", 0) == 0) {
@@ -333,6 +338,17 @@ int main(int argc, const char* argv[]) {
         }
         if (arg == "--no-thinking") {
             disable_thinking = true;
+            continue;
+        }
+        if (arg == "--prompt-file-mode=whole" || arg == "--prompt-file-as-whole") {
+            prompt_file_as_whole = true;
+            continue;
+        }
+        if (arg == "--prompt-file-mode" && (i + 1) < argc) {
+            std::string mode = argv[++i];
+            if (mode == "whole" || mode == "file") {
+                prompt_file_as_whole = true;
+            }
             continue;
         }
         // Keep backward compatibility: any extra 5th positional arg toggles no-thinking.
@@ -352,5 +368,5 @@ int main(int argc, const char* argv[]) {
     llm->set_config(R"({
         "async":false
     })");
-    return eval(llm.get(), prompt_file, max_token_number, metrics_jsonl);
+    return eval(llm.get(), prompt_file, max_token_number, metrics_jsonl, prompt_file_as_whole);
 }

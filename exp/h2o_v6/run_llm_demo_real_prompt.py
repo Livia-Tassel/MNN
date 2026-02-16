@@ -123,6 +123,7 @@ def main():
             str(args.decode_tokens),
             "--metrics-jsonl",
             str(metrics_path),
+            "--prompt-file-mode=whole",
         ]
         proc = subprocess.run(cmd, env=env, text=True, capture_output=True)
         stdout = proc.stdout or ""
