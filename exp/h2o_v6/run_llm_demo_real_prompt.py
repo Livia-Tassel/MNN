@@ -62,6 +62,22 @@ def coerce_float(v, default=0.0):
         return default
 
 
+def has_cli_summary_metrics(cli_metrics: dict) -> bool:
+    return (
+        int(cli_metrics.get("prompt_tokens", 0)) > 0
+        and float(cli_metrics.get("prefill_s", 0.0)) > 0.0
+    )
+
+
+def has_jsonl_summary_metrics(h2o_metrics: dict) -> bool:
+    if not isinstance(h2o_metrics, dict) or not h2o_metrics:
+        return False
+    return (
+        coerce_int(h2o_metrics.get("prompt_tokens", 0)) > 0
+        and coerce_float(h2o_metrics.get("prefill_us", 0.0)) > 0.0
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_demo with real prompt files and collect structured metrics.")
     parser.add_argument("--llm-demo", default="./build/llm_demo")
@@ -100,7 +116,14 @@ def main():
 
         env = os.environ.copy()
         env["LLM_DEMO_METRICS_JSONL"] = str(metrics_path)
-        cmd = [args.llm_demo, args.config, str(prompt_file), str(args.decode_tokens)]
+        cmd = [
+            args.llm_demo,
+            args.config,
+            str(prompt_file),
+            str(args.decode_tokens),
+            "--metrics-jsonl",
+            str(metrics_path),
+        ]
         proc = subprocess.run(cmd, env=env, text=True, capture_output=True)
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -109,6 +132,15 @@ def main():
 
         cli_metrics = parse_cli_metrics(stdout + "\n" + stderr)
         h2o_metrics = load_metrics_jsonl(metrics_path)
+
+        effective_rc = int(proc.returncode)
+        if "LLM init error" in (stdout + "\n" + stderr):
+            effective_rc = 1
+        if effective_rc == 0 and not (
+            has_cli_summary_metrics(cli_metrics) or has_jsonl_summary_metrics(h2o_metrics)
+        ):
+            # Treat "instant success with no metrics" as invalid run.
+            effective_rc = 2
 
         cli_prompt_tokens = int(cli_metrics.get("prompt_tokens", 0))
         cli_decode_tokens = int(cli_metrics.get("decode_tokens", 0))
@@ -131,6 +163,7 @@ def main():
             "run_tag": args.run_tag,
             "prompt_file": str(prompt_file),
             "returncode": proc.returncode,
+            "effective_returncode": effective_rc,
             "prompt_tokens": prompt_tokens,
             "decode_tokens": decode_tokens,
             "prefill_s": prefill_s,
@@ -165,13 +198,13 @@ def main():
     summary = {
         "run_tag": args.run_tag,
         "total_runs": len(rows),
-        "pass_runs": sum(1 for r in rows if int(r.get("returncode", 1)) == 0),
+        "pass_runs": sum(1 for r in rows if int(r.get("effective_returncode", 1)) == 0),
         "decode_tps_avg": (sum(decode_tps_values) / len(decode_tps_values)) if decode_tps_values else 0.0,
         "decode_tps_min": min(decode_tps_values) if decode_tps_values else 0.0,
         "decode_tps_max": max(decode_tps_values) if decode_tps_values else 0.0,
         "runtime_decomp_us_max": max(decomp_values) if decomp_values else 0.0,
         "decode_cache_hit_max": max(cache_hits) if cache_hits else 0.0,
-        "overall_pass": len(rows) > 0 and all(int(r.get("returncode", 1)) == 0 for r in rows),
+        "overall_pass": len(rows) > 0 and all(int(r.get("effective_returncode", 1)) == 0 for r in rows),
         "runs_jsonl": str(runs_jsonl),
     }
     summary_json.write_text(json.dumps(summary, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -193,7 +226,7 @@ def main():
     for r in rows:
         h2o = r.get("h2o_metrics", {}) if isinstance(r.get("h2o_metrics"), dict) else {}
         lines.append(
-            f"- {Path(r['prompt_file']).name}: rc={r['returncode']}, "
+            f"- {Path(r['prompt_file']).name}: rc={r['returncode']}, effective_rc={r['effective_returncode']}, "
             f"decode_tps={float(r.get('decode_tps', 0.0)):.4f}, "
             f"decomp_us={float(h2o.get('h2o_lossless_decompress_us', 0.0)):.4f}, "
             f"cache_hit={float(h2o.get('h2o_lossless_decode_cache_hit', 0.0)):.4f}"

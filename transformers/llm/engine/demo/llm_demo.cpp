@@ -141,10 +141,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         }
         
         if (max_token_number >= 0) {
-            llm->response(prompt, &std::cout, nullptr, 0);
-            while (!llm->stoped() && context->gen_seq_len < max_token_number) {
-                llm->generate(1);
-            }
+            llm->response(prompt, &std::cout, nullptr, max_token_number);
         } else {
             llm->response(prompt);
         }
@@ -288,7 +285,7 @@ void chat(Llm* llm) {
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " config.json <prompt.txt>" << std::endl;
-        return 0;
+        return 1;
     }
     MNN::BackendConfig backendConfig;
     auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
@@ -303,7 +300,7 @@ int main(int argc, const char* argv[]) {
         bool res = llm->load();
         if (!res) {
             MNN_ERROR("LLM init error\n");
-            return 0;
+            return 1;
         }
     }
     if (true) {

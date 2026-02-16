@@ -9,7 +9,13 @@ set -euo pipefail
 # ============================================================================
 
 MODEL_CONFIG="${MODEL_CONFIG:-/home10T/ljq/mnn_data/models/llama2_mnn/config.json}"
-LLM_DEMO="${LLM_DEMO:-./build/llm_demo}"
+if [[ -z "${LLM_DEMO:-}" ]]; then
+  if [[ -x "./build_h2o_v6/llm_demo" ]]; then
+    LLM_DEMO="./build_h2o_v6/llm_demo"
+  else
+    LLM_DEMO="./build/llm_demo"
+  fi
+fi
 PROMPT_DIR="${PROMPT_DIR:-/home10T/ljq/MNN/exp/gear_fp16/prompts}"
 PROMPT_PATTERN="${PROMPT_PATTERN:-prompt_*.txt}"
 OUT="${OUT:-exp/h2o_v6/out_llm_demo_v6_$(date +%Y%m%d_%H%M%S)}"
@@ -76,6 +82,7 @@ fi
 echo "============================================================"
 echo " H2O v6 llm_demo Real Prompt Validation"
 echo " OUT = ${OUT}"
+echo " LLM_DEMO = ${LLM_DEMO}"
 echo " PROMPT_DIR = ${PROMPT_DIR}"
 echo " PROMPT_PATTERN = ${PROMPT_PATTERN}"
 echo "============================================================"
