@@ -13,6 +13,8 @@
 
 #include <memory>
 #include <vector>
+#include <deque>
+#include <future>
 #include <functional>
 #include <cstdint>
 #include "core/Execution.hpp"
@@ -43,6 +45,13 @@ private:
                 std::vector<uint8_t> keyBlob;
                 std::vector<uint8_t> valueBlob;
             };
+            struct DecodedCacheEntry {
+                int startToken = 0;
+                int tokenCount = 0;
+                uint64_t rawHash = 0;
+                std::vector<uint8_t> keyDecoded;
+                std::vector<uint8_t> valueDecoded;
+            };
             std::vector<float> blockScores;
             int64_t losslessLastStep = 0;
             int losslessLastTokenBudget = 0;
@@ -55,9 +64,32 @@ private:
             int64_t losslessUpdateCount = 0;
             int64_t losslessBackpressureSkipCount = 0;
             std::vector<LosslessBlock> losslessBlocks;
+            std::deque<DecodedCacheEntry> decodeCacheEntries;
+        };
+        struct AsyncResult {
+            int layerIndex = 0;
+            int startToken = 0;
+            int tokenCount = 0;
+            bool runtimeStoreMode = false;
+            bool fallbackUsed = false;
+            bool backpressureSkipped = false;
+            uint64_t rawBytes = 0;
+            uint64_t compressedBytes = 0;
+            uint64_t decompressedBytes = 0;
+            uint64_t attemptedCompressedBytes = 0;
+            uint64_t rawHash = 0;
+            float attemptedRatio = 1.0f;
+            float ratio = 1.0f;
+            int64_t compressUs = 0;
+            int64_t decompressUs = 0;
+            std::vector<uint8_t> keyBlob;
+            std::vector<uint8_t> valueBlob;
         };
         std::vector<LayerState> layerStates;
         std::vector<int> reserveStorage;
+        std::future<AsyncResult> asyncFuture;
+        bool asyncFutureValid = false;
+        int asyncFutureLayerIndex = -1;
         int64_t decodeLayerCursor = 0;
         int64_t globalStep = 0;
         int64_t globalTokenStep = 0;
@@ -73,6 +105,10 @@ private:
         int64_t globalLastLosslessDecompressUs = 0;
         int64_t globalLosslessQueueDepthPeak = 0;
         int64_t globalLosslessFallbackCount = 0;
+        int64_t globalLosslessAsyncQueuePeak = 0;
+        int64_t globalLosslessAsyncWaitUs = 0;
+        int64_t globalLosslessDecodeCacheHit = 0;
+        int64_t globalLosslessDecodeCacheMiss = 0;
     };
 
     bool mKVCache        = true;

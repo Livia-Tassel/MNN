@@ -1351,6 +1351,16 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mH2OState->globalLastLosslessDecompressUs = 0;
         mH2OState->globalLosslessQueueDepthPeak = 0;
         mH2OState->globalLosslessFallbackCount = 0;
+        mH2OState->globalLosslessAsyncQueuePeak = 0;
+        mH2OState->globalLosslessAsyncWaitUs = 0;
+        mH2OState->globalLosslessDecodeCacheHit = 0;
+        mH2OState->globalLosslessDecodeCacheMiss = 0;
+        if (mH2OState->asyncFutureValid) {
+            mH2OState->asyncFuture.wait();
+            (void)mH2OState->asyncFuture.get();
+            mH2OState->asyncFutureValid = false;
+            mH2OState->asyncFutureLayerIndex = -1;
+        }
         for (auto& state : mH2OState->layerStates) {
             state.blockScores.clear();
             state.losslessLastStep = 0;
@@ -1364,6 +1374,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             state.losslessUpdateCount = 0;
             state.losslessBackpressureSkipCount = 0;
             state.losslessBlocks.clear();
+            state.decodeCacheEntries.clear();
         }
     }
     int h2oLayerStart = 0;
@@ -2026,28 +2037,36 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             std::vector<uint8_t> keyBlob;
             std::vector<uint8_t> valueBlob;
         };
-        auto encodeLosslessRuntimeStats = [&](int startToken, int tokenCount) -> LosslessRuntimeStats {
-            LosslessRuntimeStats stats;
+        struct LosslessCollectPayload {
+            int evalStart = 0;
+            int evalTokens = 0;
+            uint64_t rawBytes = 0;
+            uint64_t rawHash = 0;
+            bool fallbackUsed = false;
+            std::vector<uint8_t> keyMerged;
+            std::vector<uint8_t> valueMerged;
+        };
+        const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
+        const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
+        const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
+        auto collectLosslessRuntimePayload = [&](int startToken, int tokenCount) -> LosslessCollectPayload {
+            LosslessCollectPayload payload;
             if (mMeta->h2o_lossless_codec != 1
                 || mMeta->h2o_lossless_runtime_enable == 0
                 || tokenCount <= 0
                 || kvSeqLen <= 0) {
-                return stats;
+                return payload;
             }
             if (mBytes != 2 && mBytes != 4) {
-                stats.fallbackUsed = true;
-                return stats;
+                payload.fallbackUsed = true;
+                return payload;
             }
-            const int evalStart = clampInt(startToken, 0, kvSeqLen);
-            const int evalTokens = clampInt(tokenCount, 0, kvSeqLen - evalStart);
-            if (evalTokens <= 0) {
-                return stats;
+            payload.evalStart = clampInt(startToken, 0, kvSeqLen);
+            payload.evalTokens = clampInt(tokenCount, 0, kvSeqLen - payload.evalStart);
+            if (payload.evalTokens <= 0) {
+                return payload;
             }
-            const PredictorFlags keyFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_k, true);
-            const PredictorFlags valueFlags = parsePredictorFlags(mMeta->h2o_lossless_predictors_v, true);
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
-            std::vector<uint8_t> keyMerged;
-            std::vector<uint8_t> valueMerged;
             collectKvMergedRange(
                 mKVCacheManager.get(),
                 mKvNumHead,
@@ -2056,41 +2075,46 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 lP,
                 hP,
                 flashBlockKv,
-                evalStart,
-                evalTokens,
-                keyMerged,
-                valueMerged);
-
-            const uint64_t rawFullBytes = (uint64_t)keyMerged.size() + (uint64_t)valueMerged.size();
-            if (rawFullBytes == 0) {
-                stats.fallbackUsed = true;
+                payload.evalStart,
+                payload.evalTokens,
+                payload.keyMerged,
+                payload.valueMerged);
+            payload.rawBytes = (uint64_t)payload.keyMerged.size() + (uint64_t)payload.valueMerged.size();
+            if (payload.rawBytes == 0) {
+                payload.fallbackUsed = true;
+                return payload;
+            }
+            if (strictRoundtrip) {
+                const uint64_t keyHash = fnv1a64(payload.keyMerged.data(), payload.keyMerged.size());
+                payload.rawHash = fnv1a64(payload.valueMerged.data(), payload.valueMerged.size(), keyHash);
+            }
+            return payload;
+        };
+        auto encodeLosslessRuntimePayload = [&](const LosslessCollectPayload& payload) -> LosslessRuntimeStats {
+            LosslessRuntimeStats stats;
+            if (payload.fallbackUsed || payload.rawBytes == 0) {
+                stats.fallbackUsed = payload.fallbackUsed;
                 return stats;
             }
-
-            stats.rawBytes = rawFullBytes;
-            const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
-            if (strictRoundtrip) {
-                const uint64_t keyHash = fnv1a64(keyMerged.data(), keyMerged.size());
-                stats.rawHash = fnv1a64(valueMerged.data(), valueMerged.size(), keyHash);
-            }
-
+            stats.rawBytes = payload.rawBytes;
+            stats.rawHash = payload.rawHash;
             auto c0 = std::chrono::high_resolution_clock::now();
             bool keyOk = false;
             bool valueOk = false;
-            if (!keyMerged.empty()) {
+            if (!payload.keyMerged.empty()) {
                 if (mBytes == 2) {
-                    keyOk = encodeFp16GearPredictive(keyMerged.data(), keyMerged.size(), keyFlags, keyFlags, stats.keyBlob);
+                    keyOk = encodeFp16GearPredictive(payload.keyMerged.data(), payload.keyMerged.size(), keyFlags, keyFlags, stats.keyBlob);
                 } else {
-                    keyOk = encodeFp32LanePredictive(keyMerged.data(), keyMerged.size(), keyFlags, stats.keyBlob);
+                    keyOk = encodeFp32LanePredictive(payload.keyMerged.data(), payload.keyMerged.size(), keyFlags, stats.keyBlob);
                 }
             } else {
                 keyOk = true;
             }
-            if (!valueMerged.empty()) {
+            if (!payload.valueMerged.empty()) {
                 if (mBytes == 2) {
-                    valueOk = encodeFp16GearPredictive(valueMerged.data(), valueMerged.size(), valueFlags, valueFlags, stats.valueBlob);
+                    valueOk = encodeFp16GearPredictive(payload.valueMerged.data(), payload.valueMerged.size(), valueFlags, valueFlags, stats.valueBlob);
                 } else {
-                    valueOk = encodeFp32LanePredictive(valueMerged.data(), valueMerged.size(), valueFlags, stats.valueBlob);
+                    valueOk = encodeFp32LanePredictive(payload.valueMerged.data(), payload.valueMerged.size(), valueFlags, stats.valueBlob);
                 }
             } else {
                 valueOk = true;
@@ -2108,7 +2132,6 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 stats.ratio = 1.0f;
                 return stats;
             }
-
             const uint64_t attemptedBytes = static_cast<uint64_t>(stats.keyBlob.size() + stats.valueBlob.size());
             if (attemptedBytes == 0) {
                 stats.fallbackUsed = true;
@@ -2121,10 +2144,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 return stats;
             }
             stats.attemptedCompressedBytes = attemptedBytes;
-            stats.attemptedRatio = attemptedBytes > 0
-                ? static_cast<float>((double)rawFullBytes / (double)attemptedBytes)
-                : 1.0f;
-            if (attemptedBytes >= rawFullBytes) {
+            stats.attemptedRatio = static_cast<float>((double)payload.rawBytes / (double)attemptedBytes);
+            if (attemptedBytes >= payload.rawBytes) {
                 stats.fallbackUsed = true;
                 stats.keyBlob.clear();
                 stats.valueBlob.clear();
@@ -2133,10 +2154,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 return stats;
             }
             stats.compressedBytes = attemptedBytes;
-            stats.ratio = attemptedBytes > 0
-                ? static_cast<float>((double)rawFullBytes / (double)attemptedBytes)
-                : 1.0f;
+            stats.ratio = static_cast<float>((double)payload.rawBytes / (double)attemptedBytes);
             return stats;
+        };
+        auto encodeLosslessRuntimeStats = [&](int startToken, int tokenCount) -> LosslessRuntimeStats {
+            auto payload = collectLosslessRuntimePayload(startToken, tokenCount);
+            if (payload.fallbackUsed && payload.rawBytes == 0) {
+                LosslessRuntimeStats stats;
+                stats.fallbackUsed = true;
+                return stats;
+            }
+            return encodeLosslessRuntimePayload(payload);
         };
 
         auto decodeOnePendingLosslessBlock = [&](CPUAttention::H2OSharedState::LayerState& layerState) {
@@ -2149,32 +2177,56 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     layerState.losslessFallbackCount += 1;
                     return;
                 }
+                uint64_t cacheHash = block.rawHash;
+                if (cacheHash == 0) {
+                    cacheHash = fnv1a64(block.keyBlob.data(), block.keyBlob.size());
+                    cacheHash = fnv1a64(block.valueBlob.data(), block.valueBlob.size(), cacheHash);
+                }
                 std::vector<uint8_t> keyDecoded;
                 std::vector<uint8_t> valueDecoded;
-                auto d0 = std::chrono::high_resolution_clock::now();
-                bool keyOk = true;
-                bool valueOk = true;
-                if (!block.keyBlob.empty()) {
-                    if (mBytes == 2) {
-                        keyOk = decodeFp16GearPredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
-                    } else {
-                        keyOk = decodeFp32LanePredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
+                bool cacheHit = false;
+                for (auto it = layerState.decodeCacheEntries.begin(); it != layerState.decodeCacheEntries.end(); ++it) {
+                    if (it->startToken != block.startToken
+                        || it->tokenCount != block.tokenCount
+                        || it->rawHash != cacheHash) {
+                        continue;
                     }
+                    keyDecoded = it->keyDecoded;
+                    valueDecoded = it->valueDecoded;
+                    auto entry = std::move(*it);
+                    layerState.decodeCacheEntries.erase(it);
+                    layerState.decodeCacheEntries.push_back(std::move(entry));
+                    cacheHit = true;
+                    mH2OState->globalLosslessDecodeCacheHit += 1;
+                    break;
                 }
-                if (!block.valueBlob.empty()) {
-                    if (mBytes == 2) {
-                        valueOk = decodeFp16GearPredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
-                    } else {
-                        valueOk = decodeFp32LanePredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
+                if (!cacheHit) {
+                    auto d0 = std::chrono::high_resolution_clock::now();
+                    bool keyOk = true;
+                    bool valueOk = true;
+                    if (!block.keyBlob.empty()) {
+                        if (mBytes == 2) {
+                            keyOk = decodeFp16GearPredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
+                        } else {
+                            keyOk = decodeFp32LanePredictive(block.keyBlob.data(), block.keyBlob.size(), keyDecoded);
+                        }
                     }
-                }
-                auto d1 = std::chrono::high_resolution_clock::now();
-                const int64_t decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
-                // Count real decode work even if round-trip validation fails.
-                layerState.losslessDecompressUs += decodeUs;
-                if (!keyOk || !valueOk) {
-                    layerState.losslessFallbackCount += 1;
-                    return;
+                    if (!block.valueBlob.empty()) {
+                        if (mBytes == 2) {
+                            valueOk = decodeFp16GearPredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
+                        } else {
+                            valueOk = decodeFp32LanePredictive(block.valueBlob.data(), block.valueBlob.size(), valueDecoded);
+                        }
+                    }
+                    auto d1 = std::chrono::high_resolution_clock::now();
+                    const int64_t decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
+                    // Count real decode work even if round-trip validation fails.
+                    layerState.losslessDecompressUs += decodeUs;
+                    mH2OState->globalLosslessDecodeCacheMiss += 1;
+                    if (!keyOk || !valueOk) {
+                        layerState.losslessFallbackCount += 1;
+                        return;
+                    }
                 }
                 const uint64_t decodedBytes = static_cast<uint64_t>(keyDecoded.size() + valueDecoded.size());
                 if (decodedBytes != block.rawBytes) {
@@ -2189,6 +2241,23 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         return;
                     }
                 }
+                if (!cacheHit) {
+                    CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+                    entry.startToken = block.startToken;
+                    entry.tokenCount = block.tokenCount;
+                    entry.rawHash = cacheHash;
+                    entry.keyDecoded = keyDecoded;
+                    entry.valueDecoded = valueDecoded;
+                    layerState.decodeCacheEntries.push_back(std::move(entry));
+                    const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
+                    if (decodeCacheBlocks <= 0) {
+                        layerState.decodeCacheEntries.clear();
+                    } else {
+                        while ((int)layerState.decodeCacheEntries.size() > decodeCacheBlocks) {
+                            layerState.decodeCacheEntries.pop_front();
+                        }
+                    }
+                }
                 layerState.losslessDecompressedBytes += decodedBytes;
                 return;
             }
@@ -2199,6 +2268,161 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         const int runtimeMode = mMeta->h2o_lossless_runtime_mode;
         const bool runtimeProbeMode = (runtimeMode == 0);
         const bool runtimeStoreModeLocal = (runtimeMode == 2);
+        const bool asyncEncodeEnabled =
+            (mMeta->h2o_lossless_async_threads > 0) && !runtimeProbeMode;
+        auto applyEncodedStatsToLayer =
+            [&](int targetLayerIndex,
+                int startToken,
+                int tokenCount,
+                LosslessRuntimeStats stats,
+                bool updateSchedule,
+                bool bootstrapWindowSampled,
+                int coldTokenBudget,
+                int64_t scheduleStep) {
+                if (targetLayerIndex < 0 || targetLayerIndex >= (int)mH2OState->layerStates.size()) {
+                    return;
+                }
+                auto& targetLayerState = mH2OState->layerStates[targetLayerIndex];
+                if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
+                    CPUAttention::H2OSharedState::LayerState::LosslessBlock block;
+                    block.startToken = startToken;
+                    block.tokenCount = tokenCount;
+                    block.rawBytes = stats.rawBytes;
+                    block.compressedBytes = stats.compressedBytes;
+                    block.rawHash = stats.rawHash;
+                    block.decodedOnce = runtimeStoreModeLocal;
+                    block.keyBlob.swap(stats.keyBlob);
+                    block.valueBlob.swap(stats.valueBlob);
+                    targetLayerState.losslessBlocks.emplace_back(std::move(block));
+
+                    const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
+                    if (decodeCacheBlocks > 0 && !runtimeStoreModeLocal) {
+                        while ((int)targetLayerState.losslessBlocks.size() > decodeCacheBlocks) {
+                            targetLayerState.losslessBlocks.erase(targetLayerState.losslessBlocks.begin());
+                        }
+                    }
+                    if (runtimeStoreModeLocal && !targetLayerState.losslessBlocks.empty()) {
+                        auto& stored = targetLayerState.losslessBlocks.back();
+                        if (zeroKvRange(mKVCacheManager.get(),
+                                        mKvNumHead,
+                                        mHeadDim,
+                                        mBytes,
+                                        lP,
+                                        hP,
+                                        ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
+                                        stored.startToken,
+                                        stored.tokenCount)) {
+                            stored.rawDropped = true;
+                        } else {
+                            targetLayerState.losslessFallbackCount += 1;
+                        }
+                    }
+                }
+                if (!runtimeStoreModeLocal) {
+                    decodeOnePendingLosslessBlock(targetLayerState);
+                }
+                targetLayerState.losslessRawBytes += stats.rawBytes;
+                targetLayerState.losslessCompressedBytes += stats.compressedBytes;
+                targetLayerState.losslessDecompressedBytes += stats.decompressedBytes;
+                targetLayerState.losslessCompressUs += stats.compressUs;
+                targetLayerState.losslessDecompressUs += stats.decompressUs;
+                targetLayerState.losslessFallbackCount += stats.fallbackUsed ? 1 : 0;
+                if (updateSchedule) {
+                    targetLayerState.losslessUpdateCount += 1;
+                    targetLayerState.losslessLastTokenBudget = (runtimeProbeMode && bootstrapWindowSampled)
+                        ? coldTokenBudget
+                        : (startToken + tokenCount);
+                    targetLayerState.losslessLastStep = scheduleStep;
+                }
+
+                mH2OState->globalLastLosslessCodecUs = stats.compressUs;
+                mH2OState->globalLastLosslessStep = scheduleStep;
+                mH2OState->globalLastLosslessTokenBudget = targetLayerState.losslessLastTokenBudget;
+                mH2OState->globalLastLosslessRawBytes = targetLayerState.losslessRawBytes;
+                mH2OState->globalLastLosslessCompressedBytes = targetLayerState.losslessCompressedBytes;
+                mH2OState->globalLastLosslessDecompressedBytes = targetLayerState.losslessDecompressedBytes;
+                mH2OState->globalLastLosslessCompressUs = targetLayerState.losslessCompressUs;
+                mH2OState->globalLastLosslessDecompressUs = targetLayerState.losslessDecompressUs;
+                mH2OState->globalLosslessFallbackCount = targetLayerState.losslessFallbackCount;
+                if (targetLayerState.losslessCompressedBytes > 0 && targetLayerState.losslessRawBytes > 0) {
+                    mH2OState->globalLastLosslessRatio =
+                        (float)((double)targetLayerState.losslessRawBytes / (double)targetLayerState.losslessCompressedBytes);
+                }
+                const int64_t pendingAfterUpdate = (int64_t)targetLayerState.losslessBlocks.size()
+                    + (mH2OState->asyncFutureValid ? 1 : 0);
+                mH2OState->globalLosslessQueueDepthPeak =
+                    ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterUpdate);
+                if (mMeta->h2o_log_stats != 0) {
+                    const bool zstdReady = getZstdApi().available;
+                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d async_q_peak=%lld async_wait_us=%lld mode=%d zstd=%d\n",
+                              targetLayerIndex,
+                              kvSeqLen,
+                              startToken,
+                              tokenCount,
+                              (unsigned long long)stats.rawBytes,
+                              (unsigned long long)stats.attemptedCompressedBytes,
+                              (unsigned long long)stats.compressedBytes,
+                              stats.attemptedRatio,
+                              stats.ratio,
+                              (long long)stats.compressUs,
+                              (long long)targetLayerState.losslessDecompressUs,
+                              (long long)targetLayerState.losslessUpdateCount,
+                              stats.fallbackUsed ? 1 : 0,
+                              stats.backpressureSkipped ? 1 : 0,
+                              (int)pendingAfterUpdate,
+                              (long long)mH2OState->globalLosslessAsyncQueuePeak,
+                              (long long)mH2OState->globalLosslessAsyncWaitUs,
+                              runtimeMode,
+                              zstdReady ? 1 : 0);
+                }
+            };
+        auto drainAsyncResult = [&](bool waitResult) {
+            if (!mH2OState->asyncFutureValid) {
+                return;
+            }
+            if (waitResult) {
+                auto w0 = std::chrono::high_resolution_clock::now();
+                mH2OState->asyncFuture.wait();
+                auto w1 = std::chrono::high_resolution_clock::now();
+                const int64_t waitUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(w1 - w0).count();
+                mH2OState->globalLosslessAsyncWaitUs += waitUs;
+            } else {
+                auto status = mH2OState->asyncFuture.wait_for(std::chrono::microseconds(0));
+                if (status != std::future_status::ready) {
+                    return;
+                }
+            }
+            auto asyncStats = mH2OState->asyncFuture.get();
+            mH2OState->asyncFutureValid = false;
+            mH2OState->asyncFutureLayerIndex = -1;
+            LosslessRuntimeStats stats;
+            stats.ratio = asyncStats.ratio;
+            stats.attemptedRatio = asyncStats.attemptedRatio;
+            stats.rawBytes = asyncStats.rawBytes;
+            stats.compressedBytes = asyncStats.compressedBytes;
+            stats.attemptedCompressedBytes = asyncStats.attemptedCompressedBytes;
+            stats.decompressedBytes = asyncStats.decompressedBytes;
+            stats.compressUs = asyncStats.compressUs;
+            stats.decompressUs = asyncStats.decompressUs;
+            stats.fallbackUsed = asyncStats.fallbackUsed;
+            stats.backpressureSkipped = asyncStats.backpressureSkipped;
+            stats.rawHash = asyncStats.rawHash;
+            stats.keyBlob.swap(asyncStats.keyBlob);
+            stats.valueBlob.swap(asyncStats.valueBlob);
+            applyEncodedStatsToLayer(
+                asyncStats.layerIndex,
+                asyncStats.startToken,
+                asyncStats.tokenCount,
+                std::move(stats),
+                false,
+                false,
+                0,
+                mH2OState->globalTokenStep);
+        };
+        drainAsyncResult(false);
+        if (layerIndex == layerCount - 1 && mH2OState->asyncFutureValid) {
+            drainAsyncResult(true);
+        }
         if (mMeta->h2o_lossless_enable != 0
             && mMeta->h2o_lossless_codec == 1
             && mMeta->h2o_lossless_runtime_enable != 0) {
@@ -2297,11 +2521,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 layerState.losslessLastStep = 0;
                 layerState.losslessLastTokenBudget = coldTokenBudget;
                 layerState.losslessBlocks.clear();
+                layerState.decodeCacheEntries.clear();
             }
 
-            const int64_t pendingQueueDepth = countPendingBlocks(layerState);
+            const int64_t pendingQueueDepth = countPendingBlocks(layerState) + (mH2OState->asyncFutureValid ? 1 : 0);
             mH2OState->globalLosslessQueueDepthPeak =
                 ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingQueueDepth);
+            mH2OState->globalLosslessAsyncQueuePeak =
+                ALIMAX(mH2OState->globalLosslessAsyncQueuePeak, mH2OState->asyncFutureValid ? 1 : 0);
 
             const int triggerMin = ALIMAX(1, mMeta->h2o_trigger_min_tokens);
             const int updateInterval = ALIMAX(1, mMeta->h2o_update_interval);
@@ -2341,113 +2568,166 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
 
             if (evalTokenCount > 0) {
-                auto stats = encodeLosslessRuntimeStats(evalStartToken, evalTokenCount);
-                if (!stats.fallbackUsed) {
-                    const int maxQueue = ALIMAX(1, mMeta->h2o_lossless_max_queue);
-                    const int64_t pending = countPendingBlocks(layerState);
-                    if (pending >= maxQueue) {
+                const int maxQueue = ALIMAX(1, mMeta->h2o_lossless_max_queue);
+                const int64_t pending = countPendingBlocks(layerState) + (mH2OState->asyncFutureValid ? 1 : 0);
+                if (pending >= maxQueue) {
+                    LosslessRuntimeStats stats;
+                    stats.fallbackUsed = true;
+                    stats.backpressureSkipped = true;
+                    layerState.losslessBackpressureSkipCount += 1;
+                    applyEncodedStatsToLayer(
+                        layerIndex,
+                        evalStartToken,
+                        evalTokenCount,
+                        std::move(stats),
+                        true,
+                        bootstrapWindowSampled,
+                        coldTokenBudget,
+                        losslessStep);
+                } else if (asyncEncodeEnabled) {
+                    drainAsyncResult(false);
+                    if (mH2OState->asyncFutureValid) {
+                        auto waitStart = std::chrono::high_resolution_clock::now();
+                        mH2OState->asyncFuture.wait_for(std::chrono::microseconds(200));
+                        auto waitEnd = std::chrono::high_resolution_clock::now();
+                        const int64_t waitUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count();
+                        mH2OState->globalLosslessAsyncWaitUs += waitUs;
+                        drainAsyncResult(false);
+                    }
+                    if (mH2OState->asyncFutureValid) {
+                        LosslessRuntimeStats stats;
                         stats.fallbackUsed = true;
                         stats.backpressureSkipped = true;
-                        stats.compressedBytes = stats.rawBytes;
-                        stats.ratio = 1.0f;
-                        stats.keyBlob.clear();
-                        stats.valueBlob.clear();
                         layerState.losslessBackpressureSkipCount += 1;
-                    }
-                }
-                if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
-                    CPUAttention::H2OSharedState::LayerState::LosslessBlock block;
-                    block.startToken = evalStartToken;
-                    block.tokenCount = evalTokenCount;
-                    block.rawBytes = stats.rawBytes;
-                    block.compressedBytes = stats.compressedBytes;
-                    block.rawHash = stats.rawHash;
-                    block.decodedOnce = runtimeStoreModeLocal;
-                    block.keyBlob.swap(stats.keyBlob);
-                    block.valueBlob.swap(stats.valueBlob);
-                    layerState.losslessBlocks.emplace_back(std::move(block));
-
-                    const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
-                    if (decodeCacheBlocks > 0 && !runtimeStoreModeLocal) {
-                        while ((int)layerState.losslessBlocks.size() > decodeCacheBlocks) {
-                            layerState.losslessBlocks.erase(layerState.losslessBlocks.begin());
-                        }
-                    }
-                    const int64_t pendingAfterPush = countPendingBlocks(layerState);
-                    mH2OState->globalLosslessQueueDepthPeak =
-                        ALIMAX(mH2OState->globalLosslessQueueDepthPeak, pendingAfterPush);
-                    if (runtimeStoreModeLocal && !layerState.losslessBlocks.empty()) {
-                        auto& stored = layerState.losslessBlocks.back();
-                        if (zeroKvRange(mKVCacheManager.get(),
-                                        mKvNumHead,
-                                        mHeadDim,
-                                        mBytes,
-                                        lP,
-                                        hP,
-                                        ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
-                                        stored.startToken,
-                                        stored.tokenCount)) {
-                            stored.rawDropped = true;
+                        applyEncodedStatsToLayer(
+                            layerIndex,
+                            evalStartToken,
+                            evalTokenCount,
+                            std::move(stats),
+                            true,
+                            bootstrapWindowSampled,
+                            coldTokenBudget,
+                            losslessStep);
+                    } else {
+                        auto payload = collectLosslessRuntimePayload(evalStartToken, evalTokenCount);
+                        if (payload.fallbackUsed || payload.rawBytes == 0) {
+                            LosslessRuntimeStats stats;
+                            stats.fallbackUsed = payload.fallbackUsed || payload.rawBytes == 0;
+                            applyEncodedStatsToLayer(
+                                layerIndex,
+                                evalStartToken,
+                                evalTokenCount,
+                                std::move(stats),
+                                true,
+                                bootstrapWindowSampled,
+                                coldTokenBudget,
+                                losslessStep);
                         } else {
-                            layerState.losslessFallbackCount += 1;
+                            layerState.losslessUpdateCount += 1;
+                            layerState.losslessLastTokenBudget = (runtimeProbeMode && bootstrapWindowSampled)
+                                ? coldTokenBudget
+                                : (evalStartToken + evalTokenCount);
+                            layerState.losslessLastStep = losslessStep;
+                            mH2OState->asyncFutureValid = true;
+                            mH2OState->asyncFutureLayerIndex = layerIndex;
+                            mH2OState->globalLosslessAsyncQueuePeak =
+                                ALIMAX(mH2OState->globalLosslessAsyncQueuePeak, (int64_t)1);
+                            mH2OState->asyncFuture = std::async(
+                                std::launch::async,
+                                [payload = std::move(payload), layerIndex, runtimeStoreModeLocal, bytes = mBytes, keyFlags, valueFlags]() mutable {
+                                    CPUAttention::H2OSharedState::AsyncResult asyncStats;
+                                    asyncStats.layerIndex = layerIndex;
+                                    asyncStats.startToken = payload.evalStart;
+                                    asyncStats.tokenCount = payload.evalTokens;
+                                    asyncStats.runtimeStoreMode = runtimeStoreModeLocal;
+                                    asyncStats.rawBytes = payload.rawBytes;
+                                    asyncStats.rawHash = payload.rawHash;
+                                    if (payload.fallbackUsed || payload.rawBytes == 0) {
+                                        asyncStats.fallbackUsed = true;
+                                        return asyncStats;
+                                    }
+                                    auto c0 = std::chrono::high_resolution_clock::now();
+                                    bool keyOk = false;
+                                    bool valueOk = false;
+                                    if (!payload.keyMerged.empty()) {
+                                        if (bytes == 2) {
+                                            keyOk = encodeFp16GearPredictive(payload.keyMerged.data(), payload.keyMerged.size(), keyFlags, keyFlags, asyncStats.keyBlob);
+                                        } else {
+                                            keyOk = encodeFp32LanePredictive(payload.keyMerged.data(), payload.keyMerged.size(), keyFlags, asyncStats.keyBlob);
+                                        }
+                                    } else {
+                                        keyOk = true;
+                                    }
+                                    if (!payload.valueMerged.empty()) {
+                                        if (bytes == 2) {
+                                            valueOk = encodeFp16GearPredictive(payload.valueMerged.data(), payload.valueMerged.size(), valueFlags, valueFlags, asyncStats.valueBlob);
+                                        } else {
+                                            valueOk = encodeFp32LanePredictive(payload.valueMerged.data(), payload.valueMerged.size(), valueFlags, asyncStats.valueBlob);
+                                        }
+                                    } else {
+                                        valueOk = true;
+                                    }
+                                    auto c1 = std::chrono::high_resolution_clock::now();
+                                    asyncStats.compressUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(c1 - c0).count();
+                                    if (!keyOk || !valueOk) {
+                                        asyncStats.fallbackUsed = true;
+                                        asyncStats.compressedBytes = asyncStats.rawBytes;
+                                        asyncStats.attemptedCompressedBytes = asyncStats.rawBytes;
+                                        asyncStats.attemptedRatio = 1.0f;
+                                        asyncStats.ratio = 1.0f;
+                                        asyncStats.keyBlob.clear();
+                                        asyncStats.valueBlob.clear();
+                                        return asyncStats;
+                                    }
+                                    const uint64_t attemptedBytes = (uint64_t)asyncStats.keyBlob.size() + (uint64_t)asyncStats.valueBlob.size();
+                                    if (attemptedBytes == 0 || attemptedBytes >= asyncStats.rawBytes) {
+                                        asyncStats.fallbackUsed = true;
+                                        asyncStats.compressedBytes = asyncStats.rawBytes;
+                                        asyncStats.attemptedCompressedBytes = asyncStats.rawBytes;
+                                        asyncStats.attemptedRatio = 1.0f;
+                                        asyncStats.ratio = 1.0f;
+                                        asyncStats.keyBlob.clear();
+                                        asyncStats.valueBlob.clear();
+                                        return asyncStats;
+                                    }
+                                    asyncStats.attemptedCompressedBytes = attemptedBytes;
+                                    asyncStats.compressedBytes = attemptedBytes;
+                                    asyncStats.attemptedRatio = static_cast<float>((double)asyncStats.rawBytes / (double)attemptedBytes);
+                                    asyncStats.ratio = asyncStats.attemptedRatio;
+                                    return asyncStats;
+                                });
                         }
                     }
-                }
-                if (!runtimeStoreModeLocal) {
-                    // Decode one block right after enqueue so single-update runs still
-                    // report real runtime decompression cost.
-                    decodeOnePendingLosslessBlock(layerState);
-                }
-                layerState.losslessRawBytes += stats.rawBytes;
-                layerState.losslessCompressedBytes += stats.compressedBytes;
-                layerState.losslessDecompressedBytes += stats.decompressedBytes;
-                layerState.losslessCompressUs += stats.compressUs;
-                layerState.losslessDecompressUs += stats.decompressUs;
-                layerState.losslessFallbackCount += stats.fallbackUsed ? 1 : 0;
-                layerState.losslessUpdateCount += 1;
-                layerState.losslessLastTokenBudget = (runtimeProbeMode && bootstrapWindowSampled)
-                    ? coldTokenBudget
-                    : (evalStartToken + evalTokenCount);
-                layerState.losslessLastStep = losslessStep;
-
-                mH2OState->globalLastLosslessCodecUs = stats.compressUs;
-                mH2OState->globalLastLosslessStep = losslessStep;
-                mH2OState->globalLastLosslessTokenBudget = layerState.losslessLastTokenBudget;
-                // Keep latest non-zero sample as fallback in case later scope aggregation is empty.
-                mH2OState->globalLastLosslessRawBytes = layerState.losslessRawBytes;
-                mH2OState->globalLastLosslessCompressedBytes = layerState.losslessCompressedBytes;
-                mH2OState->globalLastLosslessDecompressedBytes = layerState.losslessDecompressedBytes;
-                mH2OState->globalLastLosslessCompressUs = layerState.losslessCompressUs;
-                mH2OState->globalLastLosslessDecompressUs = layerState.losslessDecompressUs;
-                mH2OState->globalLosslessFallbackCount = layerState.losslessFallbackCount;
-                if (layerState.losslessCompressedBytes > 0 && layerState.losslessRawBytes > 0) {
-                    mH2OState->globalLastLosslessRatio =
-                        (float)((double)layerState.losslessRawBytes / (double)layerState.losslessCompressedBytes);
-                }
-
-                if (mMeta->h2o_log_stats != 0) {
-                    const bool zstdReady = getZstdApi().available;
-                    const int64_t pendingAfterUpdate = countPendingBlocks(layerState);
-                    MNN_PRINT("[H2O-LOSSLESS] layer=%d kv=%d start=%d tokens=%d raw=%llu attempt_comp=%llu eff_comp=%llu attempt_ratio=%.4f eff_ratio=%.4f comp_us=%lld decomp_us=%lld updates=%lld fallback=%d backpressure=%d queue=%d mode=%d zstd=%d\n",
-                              layerIndex,
-                              kvSeqLen,
-                              evalStartToken,
-                              evalTokenCount,
-                              (unsigned long long)stats.rawBytes,
-                              (unsigned long long)stats.attemptedCompressedBytes,
-                              (unsigned long long)stats.compressedBytes,
-                              stats.attemptedRatio,
-                              stats.ratio,
-                              (long long)stats.compressUs,
-                              (long long)layerState.losslessDecompressUs,
-                              (long long)layerState.losslessUpdateCount,
-                              stats.fallbackUsed ? 1 : 0,
-                              stats.backpressureSkipped ? 1 : 0,
-                              (int)pendingAfterUpdate,
-                              runtimeMode,
-                              zstdReady ? 1 : 0);
+                } else {
+                    auto stats = encodeLosslessRuntimeStats(evalStartToken, evalTokenCount);
+                    if (!stats.fallbackUsed) {
+                        const int64_t pendingNow = countPendingBlocks(layerState);
+                        if (pendingNow >= maxQueue) {
+                            stats.fallbackUsed = true;
+                            stats.backpressureSkipped = true;
+                            stats.compressedBytes = stats.rawBytes;
+                            stats.ratio = 1.0f;
+                            stats.keyBlob.clear();
+                            stats.valueBlob.clear();
+                            layerState.losslessBackpressureSkipCount += 1;
+                        }
+                    }
+                    applyEncodedStatsToLayer(
+                        layerIndex,
+                        evalStartToken,
+                        evalTokenCount,
+                        std::move(stats),
+                        true,
+                        bootstrapWindowSampled,
+                        coldTokenBudget,
+                        losslessStep);
                 }
             }
+        }
+
+        drainAsyncResult(false);
+        if (layerIndex == layerCount - 1 && mH2OState->asyncFutureValid) {
+            drainAsyncResult(true);
         }
 
         uint64_t totalRawBytes = 0;
@@ -2537,6 +2817,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             mMeta->h2o_lossless_fallback_count = mH2OState->globalLosslessFallbackCount;
         }
         mMeta->h2o_lossless_queue_depth_peak = mH2OState->globalLosslessQueueDepthPeak;
+        mMeta->h2o_lossless_async_queue_peak = mH2OState->globalLosslessAsyncQueuePeak;
+        mMeta->h2o_lossless_async_wait_us = mH2OState->globalLosslessAsyncWaitUs;
+        mMeta->h2o_lossless_decode_cache_hit = mH2OState->globalLosslessDecodeCacheHit;
+        mMeta->h2o_lossless_decode_cache_miss = mH2OState->globalLosslessDecodeCacheMiss;
     }
 
     backend()->onReleaseBuffer(unpackQK.get(), Backend::STATIC);
@@ -2604,7 +2888,12 @@ CPUAttention::CPUAttention(Backend *backend, bool kv_cache) : Execution(backend)
 }
 
 CPUAttention::~CPUAttention() {
-
+    if (mH2OState && mH2OState.use_count() == 1 && mH2OState->asyncFutureValid) {
+        mH2OState->asyncFuture.wait();
+        (void)mH2OState->asyncFuture.get();
+        mH2OState->asyncFutureValid = false;
+        mH2OState->asyncFutureLayerIndex = -1;
+    }
 }
 
 class CPUAttentionCreator : public CPUBackend::Creator {

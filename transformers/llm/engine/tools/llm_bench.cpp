@@ -189,6 +189,10 @@ struct TestInstance {
     std::vector<double>      h2oLosslessDecompUs;
     std::vector<double>      h2oLosslessQueuePeak;
     std::vector<double>      h2oLosslessFallback;
+    std::vector<double>      h2oLosslessAsyncQueuePeak;
+    std::vector<double>      h2oLosslessAsyncWaitUs;
+    std::vector<double>      h2oLosslessDecodeCacheHit;
+    std::vector<double>      h2oLosslessDecodeCacheMiss;
     int                      backend;
     int                      precision;
     int                      power;
@@ -246,7 +250,11 @@ struct TestInstance {
             || field == "h2o_lossless_comp_us"
             || field == "h2o_lossless_decomp_us"
             || field == "h2o_lossless_queue_peak"
-            || field == "h2o_lossless_fallback") {
+            || field == "h2o_lossless_fallback"
+            || field == "h2o_lossless_async_queue_peak"
+            || field == "h2o_lossless_async_wait_us"
+            || field == "h2o_lossless_decode_cache_hit"
+            || field == "h2o_lossless_decode_cache_miss") {
             return FLOAT;
         }
         return STRING;
@@ -379,6 +387,10 @@ struct markdownPrinter : public Printer {
             fields.emplace_back("h2o_lossless_decomp_us");
             fields.emplace_back("h2o_lossless_queue_peak");
             fields.emplace_back("h2o_lossless_fallback");
+            fields.emplace_back("h2o_lossless_async_queue_peak");
+            fields.emplace_back("h2o_lossless_async_wait_us");
+            fields.emplace_back("h2o_lossless_decode_cache_hit");
+            fields.emplace_back("h2o_lossless_decode_cache_miss");
         }
         if (tp.loadTime == "true") {
             fields.emplace_back("loadingTime(s)");
@@ -477,6 +489,18 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "h2o_lossless_fallback") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessFallback), t.getStdevUs(t.h2oLosslessFallback));
+                value = buf;
+            } else if (field == "h2o_lossless_async_queue_peak") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessAsyncQueuePeak), t.getStdevUs(t.h2oLosslessAsyncQueuePeak));
+                value = buf;
+            } else if (field == "h2o_lossless_async_wait_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessAsyncWaitUs), t.getStdevUs(t.h2oLosslessAsyncWaitUs));
+                value = buf;
+            } else if (field == "h2o_lossless_decode_cache_hit") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecodeCacheHit), t.getStdevUs(t.h2oLosslessDecodeCacheHit));
+                value = buf;
+            } else if (field == "h2o_lossless_decode_cache_miss") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecodeCacheMiss), t.getStdevUs(t.h2oLosslessDecodeCacheMiss));
                 value = buf;
             } else if (field == "precision") {
                 if (t.precision == 2) value = "Low";
@@ -740,6 +764,30 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.h2oLosslessFallback));
                 writer.Key("h2o_lossless_fallback_std");
                 writer.Double(inst.getStdevUs(inst.h2oLosslessFallback));
+            }
+            if (!inst.h2oLosslessAsyncQueuePeak.empty()) {
+                writer.Key("h2o_lossless_async_queue_peak");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessAsyncQueuePeak));
+                writer.Key("h2o_lossless_async_queue_peak_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessAsyncQueuePeak));
+            }
+            if (!inst.h2oLosslessAsyncWaitUs.empty()) {
+                writer.Key("h2o_lossless_async_wait_us");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessAsyncWaitUs));
+                writer.Key("h2o_lossless_async_wait_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessAsyncWaitUs));
+            }
+            if (!inst.h2oLosslessDecodeCacheHit.empty()) {
+                writer.Key("h2o_lossless_decode_cache_hit");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessDecodeCacheHit));
+                writer.Key("h2o_lossless_decode_cache_hit_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessDecodeCacheHit));
+            }
+            if (!inst.h2oLosslessDecodeCacheMiss.empty()) {
+                writer.Key("h2o_lossless_decode_cache_miss");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessDecodeCacheMiss));
+                writer.Key("h2o_lossless_decode_cache_miss_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessDecodeCacheMiss));
             }
 
             writer.EndObject();
@@ -1424,6 +1472,10 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
                     t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
+                    t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
+                    t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);
+                    t.h2oLosslessDecodeCacheMiss.push_back((double)context->h2o_lossless_decode_cache_miss);
                 }
             }
             if (printHeader) {
@@ -1467,6 +1519,10 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
                     t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
+                    t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
+                    t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);
+                    t.h2oLosslessDecodeCacheMiss.push_back((double)context->h2o_lossless_decode_cache_miss);
                 }
             }
 

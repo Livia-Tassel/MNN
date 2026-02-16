@@ -1,0 +1,9 @@
+out*/
+out_*/
+logs/
+configs/run_*.json
+*.log
+*.csv
+*.md.tmp
+manifest.json
+__pycache__/
