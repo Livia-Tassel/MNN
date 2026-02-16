@@ -11,6 +11,7 @@ set -euo pipefail
 MODEL_CONFIG="${MODEL_CONFIG:-/home10T/ljq/mnn_data/models/llama2_mnn/config.json}"
 LLM_DEMO="${LLM_DEMO:-./build/llm_demo}"
 PROMPT_DIR="${PROMPT_DIR:-/home10T/ljq/MNN/exp/gear_fp16/prompts}"
+PROMPT_PATTERN="${PROMPT_PATTERN:-prompt_*.txt}"
 OUT="${OUT:-exp/h2o_v6/out_llm_demo_v6_$(date +%Y%m%d_%H%M%S)}"
 DECODE_TOKENS="${DECODE_TOKENS:-128}"
 DECODE_DROP_TARGET="${DECODE_DROP_TARGET:-0.08}"
@@ -76,6 +77,7 @@ echo "============================================================"
 echo " H2O v6 llm_demo Real Prompt Validation"
 echo " OUT = ${OUT}"
 echo " PROMPT_DIR = ${PROMPT_DIR}"
+echo " PROMPT_PATTERN = ${PROMPT_PATTERN}"
 echo "============================================================"
 
 python3 - "${MODEL_CONFIG}" "${BASELINE_CFG}" "${CANDIDATE_CFG}" <<'PY'
@@ -158,6 +160,7 @@ python3 exp/h2o_v6/run_llm_demo_real_prompt.py \
   --llm-demo "${LLM_DEMO}" \
   --config "${BASELINE_CFG}" \
   --prompt-dir "${PROMPT_DIR}" \
+  --prompt-pattern "${PROMPT_PATTERN}" \
   --decode-tokens "${DECODE_TOKENS}" \
   --run-tag baseline \
   --out-dir "${BASELINE_OUT}"
@@ -166,6 +169,7 @@ python3 exp/h2o_v6/run_llm_demo_real_prompt.py \
   --llm-demo "${LLM_DEMO}" \
   --config "${CANDIDATE_CFG}" \
   --prompt-dir "${PROMPT_DIR}" \
+  --prompt-pattern "${PROMPT_PATTERN}" \
   --decode-tokens "${DECODE_TOKENS}" \
   --run-tag candidate \
   --out-dir "${CANDIDATE_OUT}"

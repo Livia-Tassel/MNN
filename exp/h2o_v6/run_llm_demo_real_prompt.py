@@ -48,6 +48,20 @@ def safe_div(a: float, b: float) -> float:
     return a / b
 
 
+def coerce_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def coerce_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_demo with real prompt files and collect structured metrics.")
     parser.add_argument("--llm-demo", default="./build/llm_demo")
@@ -96,10 +110,22 @@ def main():
         cli_metrics = parse_cli_metrics(stdout + "\n" + stderr)
         h2o_metrics = load_metrics_jsonl(metrics_path)
 
-        prompt_tokens = int(cli_metrics.get("prompt_tokens", 0))
-        decode_tokens = int(cli_metrics.get("decode_tokens", 0))
-        prefill_s = float(cli_metrics.get("prefill_s", 0.0))
-        decode_s = float(cli_metrics.get("decode_s", 0.0))
+        cli_prompt_tokens = int(cli_metrics.get("prompt_tokens", 0))
+        cli_decode_tokens = int(cli_metrics.get("decode_tokens", 0))
+        cli_prefill_s = float(cli_metrics.get("prefill_s", 0.0))
+        cli_decode_s = float(cli_metrics.get("decode_s", 0.0))
+
+        jsonl_prompt_tokens = coerce_int(h2o_metrics.get("prompt_tokens", 0))
+        jsonl_decode_tokens = coerce_int(h2o_metrics.get("decode_tokens", 0))
+        jsonl_prefill_s = coerce_float(h2o_metrics.get("prefill_us", 0.0)) / 1e6
+        jsonl_decode_s = coerce_float(h2o_metrics.get("decode_us", 0.0)) / 1e6
+
+        # Prefer structured microsecond metrics from llm_demo JSONL.
+        # CLI seconds are only 2-decimal formatted and may become 0.00 for short runs.
+        prompt_tokens = jsonl_prompt_tokens if jsonl_prompt_tokens > 0 else cli_prompt_tokens
+        decode_tokens = jsonl_decode_tokens if jsonl_decode_tokens > 0 else cli_decode_tokens
+        prefill_s = jsonl_prefill_s if jsonl_prefill_s > 0 else cli_prefill_s
+        decode_s = jsonl_decode_s if jsonl_decode_s > 0 else cli_decode_s
         row = {
             "run_index": idx,
             "run_tag": args.run_tag,
@@ -112,6 +138,10 @@ def main():
             "prefill_tps": safe_div(prompt_tokens, prefill_s),
             "decode_tps": safe_div(decode_tokens, decode_s),
             "h2o_metrics": h2o_metrics,
+            "cli_prompt_tokens": cli_prompt_tokens,
+            "cli_decode_tokens": cli_decode_tokens,
+            "cli_prefill_s": cli_prefill_s,
+            "cli_decode_s": cli_decode_s,
             "stdout_log": str(stdout_path),
             "stderr_log": str(stderr_path),
             "metrics_jsonl": str(metrics_path),

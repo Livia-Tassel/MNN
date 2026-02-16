@@ -108,7 +108,10 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     // llm->warmup();
     auto context = llm->getContext();
     if (max_token_number > 0) {
-        llm->set_config("{\"max_new_tokens\":1}");
+        // Respect caller-provided decode budget for benchmark/eval scripts.
+        std::ostringstream cfg;
+        cfg << "{\"max_new_tokens\":" << max_token_number << "}";
+        llm->set_config(cfg.str());
     }
 #ifdef LLM_SUPPORT_AUDIO
     std::vector<float> waveform;
