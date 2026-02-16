@@ -62,6 +62,15 @@ def coerce_float(v, default=0.0):
         return default
 
 
+def decode_output(data) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    # llm_demo may emit non-UTF8 bytes in generated text; keep run alive.
+    return data.decode("utf-8", errors="replace")
+
+
 def has_cli_summary_metrics(cli_metrics: dict) -> bool:
     return (
         int(cli_metrics.get("prompt_tokens", 0)) > 0
@@ -125,9 +134,9 @@ def main():
             str(metrics_path),
             "--prompt-file-mode=whole",
         ]
-        proc = subprocess.run(cmd, env=env, text=True, capture_output=True)
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        proc = subprocess.run(cmd, env=env, capture_output=True)
+        stdout = decode_output(proc.stdout)
+        stderr = decode_output(proc.stderr)
         stdout_path.write_text(stdout, encoding="utf-8")
         stderr_path.write_text(stderr, encoding="utf-8")
 
