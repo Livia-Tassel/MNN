@@ -100,12 +100,48 @@ def main():
         action="store_true",
         help="Require runtime h2o_lossless_decode_cache_hit > 0 for at least one row.",
     )
+    parser.add_argument(
+        "--require-async-queue-activity",
+        action="store_true",
+        help="Require runtime h2o_lossless_async_queue_peak > 0 for at least one row.",
+    )
+    parser.add_argument(
+        "--require-decode-cache-activity",
+        action="store_true",
+        help="Require runtime (decode_cache_hit + decode_cache_miss) > 0 for at least one row.",
+    )
+    parser.add_argument(
+        "--strict-runtime-metric-columns",
+        action="store_true",
+        help="Fail quality gate when required runtime metric columns are missing in CSV.",
+    )
     parser.add_argument("--out", default="exp/h2o_v6/out/summary.md")
     args = parser.parse_args()
 
+    runtime_metric_columns = [
+        "h2o_lossless_decomp_us",
+        "h2o_lossless_queue_peak",
+        "h2o_lossless_fallback",
+        "h2o_lossless_async_queue_peak",
+        "h2o_lossless_async_wait_us",
+        "h2o_lossless_decode_cache_hit",
+        "h2o_lossless_decode_cache_miss",
+    ]
     rows = []
     with Path(args.csv).open("r", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        csv_fieldnames = list(reader.fieldnames or [])
+        missing_runtime_metric_columns = [c for c in runtime_metric_columns if c not in csv_fieldnames]
+        runtime_metric_columns_ok = len(missing_runtime_metric_columns) == 0
+        runtime_metric_columns_pass = (
+            runtime_metric_columns_ok if args.strict_runtime_metric_columns else True
+        )
+        if not runtime_metric_columns_ok:
+            print(
+                "[WARN] runtime metric columns missing in CSV: "
+                + ", ".join(missing_runtime_metric_columns)
+            )
+        for row in reader:
             row["_h2o_keep"] = parse_float(row.get("h2o_keep", "0"))
             row["_h2o_lossy"] = parse_float(row.get("h2o_lossy", "0"))
             row["_h2o_lossless_runtime"] = parse_float(row.get("h2o_lossless", "0"))
@@ -192,13 +228,28 @@ def main():
     runtime_decomp_best = max(r["_h2o_lossless_decomp_us"] for r in rows)
     runtime_queue_peak_best = max(r["_h2o_lossless_queue_peak"] for r in rows)
     runtime_fallback_best = max(r["_h2o_lossless_fallback"] for r in rows)
+    runtime_async_queue_peak_best = max(r["_h2o_lossless_async_queue_peak"] for r in rows)
     runtime_async_wait_best = max(r["_h2o_lossless_async_wait_us"] for r in rows)
     runtime_decode_cache_hit_best = max(r["_h2o_lossless_decode_cache_hit"] for r in rows)
     runtime_decode_cache_miss_best = max(r["_h2o_lossless_decode_cache_miss"] for r in rows)
+    runtime_decode_cache_activity_best = max(
+        (r["_h2o_lossless_decode_cache_hit"] + r["_h2o_lossless_decode_cache_miss"])
+        for r in rows
+    )
     runtime_decomp_required_pass = (runtime_decomp_best > 0.0) if args.require_runtime_decomp else True
     runtime_decode_cache_required_pass = (
         runtime_decode_cache_hit_best > 0.0
         if args.require_decode_cache_hit
+        else True
+    )
+    runtime_async_queue_activity_pass = (
+        runtime_async_queue_peak_best > 0.0
+        if args.require_async_queue_activity
+        else True
+    )
+    runtime_decode_cache_activity_pass = (
+        runtime_decode_cache_activity_best > 0.0
+        if args.require_decode_cache_activity
         else True
     )
     decomp_gate_enabled = args.max_lossless_decomp_us >= 0.0
@@ -235,9 +286,12 @@ def main():
         lossy_pass
         and online_lossless_pass
         and decode_pass
+        and runtime_metric_columns_pass
         and runtime_decomp_pass
         and runtime_async_wait_pass
+        and runtime_async_queue_activity_pass
         and runtime_decode_cache_required_pass
+        and runtime_decode_cache_activity_pass
         and runtime_queue_peak_pass
         and runtime_fallback_pass
     )
@@ -320,20 +374,45 @@ def main():
         f.write(f"- lossless_online_pass: {format_gate_bool(online_lossless_pass)}\n")
         f.write(f"- runtime_decomp_required: {format_gate_bool(args.require_runtime_decomp)}\n")
         f.write(f"- runtime_decomp_best_us: {runtime_decomp_best:.4f}\n")
+        f.write(
+            f"- runtime_metric_columns_strict: {format_gate_bool(args.strict_runtime_metric_columns)}\n"
+        )
+        f.write(f"- runtime_metric_columns_ok: {format_gate_bool(runtime_metric_columns_ok)}\n")
+        f.write(
+            f"- runtime_metric_columns_pass: {format_gate_bool(runtime_metric_columns_pass)}\n"
+        )
+        f.write(f"- runtime_metric_missing_columns: {missing_runtime_metric_columns}\n")
         f.write(f"- runtime_decomp_gate_enabled: {format_gate_bool(decomp_gate_enabled)}\n")
         if decomp_gate_enabled:
             f.write(f"- runtime_decomp_target_us: {args.max_lossless_decomp_us:.4f}\n")
+        f.write(f"- runtime_async_queue_peak_best: {runtime_async_queue_peak_best:.4f}\n")
+        f.write(
+            f"- runtime_async_queue_activity_required: {format_gate_bool(args.require_async_queue_activity)}\n"
+        )
         f.write(f"- runtime_async_wait_best_us: {runtime_async_wait_best:.4f}\n")
         f.write(f"- runtime_async_wait_gate_enabled: {format_gate_bool(async_wait_gate_enabled)}\n")
         if async_wait_gate_enabled:
             f.write(f"- runtime_async_wait_target_us: {args.max_lossless_async_wait_us:.4f}\n")
         f.write(f"- runtime_decode_cache_hit_best: {runtime_decode_cache_hit_best:.4f}\n")
         f.write(f"- runtime_decode_cache_miss_best: {runtime_decode_cache_miss_best:.4f}\n")
+        f.write(f"- runtime_decode_cache_activity_best: {runtime_decode_cache_activity_best:.4f}\n")
         f.write(f"- runtime_decode_cache_required: {format_gate_bool(args.require_decode_cache_hit)}\n")
+        f.write(
+            f"- runtime_decode_cache_activity_required: "
+            f"{format_gate_bool(args.require_decode_cache_activity)}\n"
+        )
         f.write(f"- runtime_decomp_required_pass: {format_gate_bool(runtime_decomp_required_pass)}\n")
         f.write(f"- runtime_decomp_budget_pass: {format_gate_bool(runtime_decomp_budget_pass)}\n")
+        f.write(
+            f"- runtime_async_queue_activity_pass: "
+            f"{format_gate_bool(runtime_async_queue_activity_pass)}\n"
+        )
         f.write(f"- runtime_async_wait_pass: {format_gate_bool(runtime_async_wait_pass)}\n")
         f.write(f"- runtime_decode_cache_required_pass: {format_gate_bool(runtime_decode_cache_required_pass)}\n")
+        f.write(
+            f"- runtime_decode_cache_activity_pass: "
+            f"{format_gate_bool(runtime_decode_cache_activity_pass)}\n"
+        )
         f.write(f"- runtime_queue_peak_best: {runtime_queue_peak_best:.4f}\n")
         f.write(f"- runtime_fallback_best: {runtime_fallback_best:.4f}\n")
         f.write(f"- runtime_queue_peak_gate_enabled: {format_gate_bool(queue_peak_gate_enabled)}\n")

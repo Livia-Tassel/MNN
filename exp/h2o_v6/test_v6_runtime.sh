@@ -64,6 +64,9 @@ MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK:-0}"
 MAX_LOSSLESS_DECOMP_US="${MAX_LOSSLESS_DECOMP_US:--1}"
 MAX_LOSSLESS_ASYNC_WAIT_US="${MAX_LOSSLESS_ASYNC_WAIT_US:--1}"
 REQUIRE_DECODE_CACHE_HIT="${REQUIRE_DECODE_CACHE_HIT:-0}"
+REQUIRE_ASYNC_QUEUE_ACTIVITY="${REQUIRE_ASYNC_QUEUE_ACTIVITY:-0}"
+REQUIRE_DECODE_CACHE_ACTIVITY="${REQUIRE_DECODE_CACHE_ACTIVITY:-0}"
+STRICT_RUNTIME_METRIC_COLUMNS="${STRICT_RUNTIME_METRIC_COLUMNS:-1}"
 KV_LOSSLESS_ASYNC_THREADS="${KV_LOSSLESS_ASYNC_THREADS:-1}"
 KV_LOSSLESS_DECODE_CACHE_BLOCKS="${KV_LOSSLESS_DECODE_CACHE_BLOCKS:-64}"
 
@@ -146,6 +149,9 @@ echo "  MAX_LOSSLESS_FALLBACK=${MAX_LOSSLESS_FALLBACK}"
 echo "  MAX_LOSSLESS_DECOMP_US=${MAX_LOSSLESS_DECOMP_US}"
 echo "  MAX_LOSSLESS_ASYNC_WAIT_US=${MAX_LOSSLESS_ASYNC_WAIT_US}"
 echo "  REQUIRE_DECODE_CACHE_HIT=${REQUIRE_DECODE_CACHE_HIT}"
+echo "  REQUIRE_ASYNC_QUEUE_ACTIVITY=${REQUIRE_ASYNC_QUEUE_ACTIVITY}"
+echo "  REQUIRE_DECODE_CACHE_ACTIVITY=${REQUIRE_DECODE_CACHE_ACTIVITY}"
+echo "  STRICT_RUNTIME_METRIC_COLUMNS=${STRICT_RUNTIME_METRIC_COLUMNS}"
 echo "  KV_LOSSLESS_ASYNC_THREADS=${KV_LOSSLESS_ASYNC_THREADS}"
 echo "  KV_LOSSLESS_DECODE_CACHE_BLOCKS=${KV_LOSSLESS_DECODE_CACHE_BLOCKS}"
 
@@ -665,8 +671,8 @@ fi
 # ── Step 6: Offline lossless + Fix 2 regression ──────────────────────────
 echo ""
 echo "==== Step 6: Offline lossless (upper-bound + online-sim) ===="
-OFFLINE_UPPER_FLAG=""
-OFFLINE_ONLINE_FLAG=""
+OFFLINE_UPPER_ARGS=()
+OFFLINE_ONLINE_ARGS=()
 if [[ -d "${DUMP_DIR}" ]]; then
   # Upper-bound
   python3 exp/h2o_v6/offline_lossless_fp16.py \
@@ -699,8 +705,8 @@ if [[ -d "${DUMP_DIR}" ]]; then
     --out-md "${OUT}/offline_lossless_online_grouped.md" \
     --overwrite
 
-  OFFLINE_UPPER_FLAG="--offline-lossless-json ${OUT}/offline_lossless_upper.json"
-  OFFLINE_ONLINE_FLAG="--offline-lossless-online-json ${OUT}/offline_lossless_online_grouped.json"
+  OFFLINE_UPPER_ARGS=(--offline-lossless-json "${OUT}/offline_lossless_upper.json")
+  OFFLINE_ONLINE_ARGS=(--offline-lossless-online-json "${OUT}/offline_lossless_online_grouped.json")
 
   # ── Fix 2 regression: verify compression_failed doesn't inflate ratio ──
   echo ""
@@ -743,38 +749,38 @@ fi
 # ── Step 7: Quality gate ─────────────────────────────────────────────────
 echo ""
 echo "==== Step 7: Quality gate ===="
-# shellcheck disable=SC2086
-python3 exp/h2o_v6/analyze_h2o_v6.py \
-  --csv "${OUT}/h2o_metrics.csv" \
-  ${OFFLINE_UPPER_FLAG} \
-  ${OFFLINE_ONLINE_FLAG} \
-  --lossy-target "${LOSSY_TARGET}" \
-  --lossless-target "${LOSSLESS_TARGET}" \
-  --require-runtime-decomp \
-  --max-lossless-queue-peak "${MAX_LOSSLESS_QUEUE_PEAK}" \
-  --max-lossless-fallback "${MAX_LOSSLESS_FALLBACK}" \
-  --max-lossless-decomp-us "${MAX_LOSSLESS_DECOMP_US}" \
-  --max-lossless-async-wait-us "${MAX_LOSSLESS_ASYNC_WAIT_US}" \
-  --decode-baseline "${DECODE_BASELINE}" \
-  --decode-drop-target "${DECODE_DROP_TARGET}" \
+ANALYZE_ARGS=(
+  --csv "${OUT}/h2o_metrics.csv"
+  --lossy-target "${LOSSY_TARGET}"
+  --lossless-target "${LOSSLESS_TARGET}"
+  --require-runtime-decomp
+  --max-lossless-queue-peak "${MAX_LOSSLESS_QUEUE_PEAK}"
+  --max-lossless-fallback "${MAX_LOSSLESS_FALLBACK}"
+  --max-lossless-decomp-us "${MAX_LOSSLESS_DECOMP_US}"
+  --max-lossless-async-wait-us "${MAX_LOSSLESS_ASYNC_WAIT_US}"
+  --decode-baseline "${DECODE_BASELINE}"
+  --decode-drop-target "${DECODE_DROP_TARGET}"
   --out "${OUT}/summary.md"
-if [[ "${REQUIRE_DECODE_CACHE_HIT}" -ne 0 ]]; then
-  python3 exp/h2o_v6/analyze_h2o_v6.py \
-    --csv "${OUT}/h2o_metrics.csv" \
-    ${OFFLINE_UPPER_FLAG} \
-    ${OFFLINE_ONLINE_FLAG} \
-    --lossy-target "${LOSSY_TARGET}" \
-    --lossless-target "${LOSSLESS_TARGET}" \
-    --require-runtime-decomp \
-    --require-decode-cache-hit \
-    --max-lossless-queue-peak "${MAX_LOSSLESS_QUEUE_PEAK}" \
-    --max-lossless-fallback "${MAX_LOSSLESS_FALLBACK}" \
-    --max-lossless-decomp-us "${MAX_LOSSLESS_DECOMP_US}" \
-    --max-lossless-async-wait-us "${MAX_LOSSLESS_ASYNC_WAIT_US}" \
-    --decode-baseline "${DECODE_BASELINE}" \
-    --decode-drop-target "${DECODE_DROP_TARGET}" \
-    --out "${OUT}/summary.md"
+)
+if [[ ${#OFFLINE_UPPER_ARGS[@]} -gt 0 ]]; then
+  ANALYZE_ARGS+=("${OFFLINE_UPPER_ARGS[@]}")
 fi
+if [[ ${#OFFLINE_ONLINE_ARGS[@]} -gt 0 ]]; then
+  ANALYZE_ARGS+=("${OFFLINE_ONLINE_ARGS[@]}")
+fi
+if [[ "${STRICT_RUNTIME_METRIC_COLUMNS}" -ne 0 ]]; then
+  ANALYZE_ARGS+=(--strict-runtime-metric-columns)
+fi
+if [[ "${REQUIRE_DECODE_CACHE_HIT}" -ne 0 ]]; then
+  ANALYZE_ARGS+=(--require-decode-cache-hit)
+fi
+if [[ "${REQUIRE_ASYNC_QUEUE_ACTIVITY}" -ne 0 ]]; then
+  ANALYZE_ARGS+=(--require-async-queue-activity)
+fi
+if [[ "${REQUIRE_DECODE_CACHE_ACTIVITY}" -ne 0 ]]; then
+  ANALYZE_ARGS+=(--require-decode-cache-activity)
+fi
+python3 exp/h2o_v6/analyze_h2o_v6.py "${ANALYZE_ARGS[@]}"
 
 echo "Quality Gate Snapshot:"
 awk '

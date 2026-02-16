@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -87,21 +88,87 @@ def has_jsonl_summary_metrics(h2o_metrics: dict) -> bool:
     )
 
 
+def resolve_manifest_prompt_path(raw_path: str, prompt_dir: Path) -> Path:
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = (prompt_dir / p).resolve()
+    else:
+        p = p.resolve()
+    return p
+
+
+def extract_manifest_path(obj: dict):
+    keys = (
+        "prompt_file",
+        "prompt_path",
+        "file",
+        "path",
+        "filename",
+        "name",
+    )
+    for k in keys:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def load_prompt_files_from_manifest(manifest_path: Path, prompt_dir: Path):
+    if not manifest_path.exists():
+        raise SystemExit(f"prompt manifest not found: {manifest_path}")
+    files = []
+    seen = set()
+    for raw in manifest_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        candidate = ""
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    candidate = extract_manifest_path(obj)
+            except Exception:
+                candidate = ""
+        if not candidate:
+            candidate = line
+        p = resolve_manifest_prompt_path(candidate, prompt_dir)
+        if p.exists() and p.is_file():
+            key = os.fspath(p)
+            if key not in seen:
+                seen.add(key)
+                files.append(p)
+    return files
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_demo with real prompt files and collect structured metrics.")
     parser.add_argument("--llm-demo", default="./build/llm_demo")
     parser.add_argument("--config", required=True)
     parser.add_argument("--prompt-dir", required=True)
     parser.add_argument("--prompt-pattern", default="prompt_*.txt")
+    parser.add_argument("--prompt-manifest", default="", help="Optional manifest (.jsonl/.txt) listing prompt files.")
+    parser.add_argument("--max-prompts", type=int, default=0, help="Optional cap on number of prompts to run.")
     parser.add_argument("--decode-tokens", type=int, default=128)
     parser.add_argument("--out-dir", default="exp/h2o_v6/out_llm_demo")
     parser.add_argument("--run-tag", default="candidate")
     args = parser.parse_args()
 
     prompt_dir = Path(args.prompt_dir)
-    files = sorted(prompt_dir.glob(args.prompt_pattern))
+    if args.prompt_manifest:
+        files = load_prompt_files_from_manifest(Path(args.prompt_manifest), prompt_dir)
+        if args.prompt_pattern:
+            files = [f for f in files if fnmatch.fnmatch(f.name, args.prompt_pattern)]
+        files = sorted(files)
+    else:
+        files = sorted(prompt_dir.glob(args.prompt_pattern))
+    if args.max_prompts > 0:
+        files = files[: args.max_prompts]
     if not files:
-        raise SystemExit(f"No prompt files found under {prompt_dir} with pattern {args.prompt_pattern}")
+        raise SystemExit(
+            f"No prompt files found under {prompt_dir} with pattern {args.prompt_pattern}"
+            + (f" and manifest {args.prompt_manifest}" if args.prompt_manifest else "")
+        )
 
     out_dir = Path(args.out_dir)
     metrics_dir = out_dir / "metrics"
@@ -207,6 +274,9 @@ def main():
 
     summary = {
         "run_tag": args.run_tag,
+        "prompt_pattern": args.prompt_pattern,
+        "prompt_manifest": args.prompt_manifest,
+        "max_prompts": int(args.max_prompts),
         "total_runs": len(rows),
         "pass_runs": sum(1 for r in rows if int(r.get("effective_returncode", 1)) == 0),
         "decode_tps_avg": (sum(decode_tps_values) / len(decode_tps_values)) if decode_tps_values else 0.0,
@@ -225,6 +295,9 @@ def main():
     lines.append(f"- total_runs: {summary['total_runs']}")
     lines.append(f"- pass_runs: {summary['pass_runs']}")
     lines.append(f"- overall_pass: {str(summary['overall_pass']).lower()}")
+    lines.append(f"- prompt_pattern: {summary['prompt_pattern']}")
+    lines.append(f"- prompt_manifest: {summary['prompt_manifest']}")
+    lines.append(f"- max_prompts: {summary['max_prompts']}")
     lines.append(f"- decode_tps_avg: {summary['decode_tps_avg']:.4f}")
     lines.append(f"- decode_tps_min: {summary['decode_tps_min']:.4f}")
     lines.append(f"- decode_tps_max: {summary['decode_tps_max']:.4f}")

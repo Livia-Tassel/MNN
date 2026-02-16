@@ -47,9 +47,17 @@ bash exp/h2o_v6/test_v6_final.sh
 ## Optional Strictness Knobs
 - `MAX_LOSSLESS_DECOMP_US`: runtime decomp budget
 - `MAX_LOSSLESS_ASYNC_WAIT_US`: async wait budget
+- `STRICT_RUNTIME_METRIC_COLUMNS=1`: fail if runtime metric columns are missing in CSV
 - `REQUIRE_DECODE_CACHE_HIT=1`: require decode cache hit evidence
+- `REQUIRE_ASYNC_QUEUE_ACTIVITY=1`: require async queue peak > 0 evidence
+- `REQUIRE_DECODE_CACHE_ACTIVITY=1`: require decode cache (hit+miss) activity > 0
 - `KV_LOSSLESS_ASYNC_THREADS`: async encode threads (v6 first release targets `1`)
 - `KV_LOSSLESS_DECODE_CACHE_BLOCKS`: decode cache capacity
+
+## Real Prompt Sampling Knobs (`test_v6_llm_demo.sh`)
+- `PROMPT_PATTERN='prompt_???_*.txt'`: glob filter (e.g. run only 128/512 prompts)
+- `PROMPT_MANIFEST=/path/to/prompts_manifest.jsonl`: use explicit prompt file list
+- `MAX_PROMPTS=6`: hard cap selected prompts for quick iteration
 
 ## Presets
 - `configs/target_core_gate_v6.json`

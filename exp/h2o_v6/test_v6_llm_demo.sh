@@ -18,6 +18,8 @@ if [[ -z "${LLM_DEMO:-}" ]]; then
 fi
 PROMPT_DIR="${PROMPT_DIR:-/home10T/ljq/MNN/exp/gear_fp16/prompts}"
 PROMPT_PATTERN="${PROMPT_PATTERN:-prompt_*.txt}"
+PROMPT_MANIFEST="${PROMPT_MANIFEST:-}"
+MAX_PROMPTS="${MAX_PROMPTS:-0}"
 OUT="${OUT:-exp/h2o_v6/out_llm_demo_v6_$(date +%Y%m%d_%H%M%S)}"
 DECODE_TOKENS="${DECODE_TOKENS:-128}"
 DECODE_DROP_TARGET="${DECODE_DROP_TARGET:-0.08}"
@@ -85,6 +87,8 @@ echo " OUT = ${OUT}"
 echo " LLM_DEMO = ${LLM_DEMO}"
 echo " PROMPT_DIR = ${PROMPT_DIR}"
 echo " PROMPT_PATTERN = ${PROMPT_PATTERN}"
+echo " PROMPT_MANIFEST = ${PROMPT_MANIFEST}"
+echo " MAX_PROMPTS = ${MAX_PROMPTS}"
 echo "============================================================"
 
 python3 - "${MODEL_CONFIG}" "${BASELINE_CFG}" "${CANDIDATE_CFG}" <<'PY'
@@ -205,21 +209,28 @@ candidate.update({
 candidate_cfg.write_text(json.dumps(candidate, ensure_ascii=True, indent=2), encoding="utf-8")
 PY
 
+RUN_PROMPT_ARGS=(
+  --llm-demo "${LLM_DEMO}"
+  --prompt-dir "${PROMPT_DIR}"
+  --prompt-pattern "${PROMPT_PATTERN}"
+  --decode-tokens "${DECODE_TOKENS}"
+)
+if [[ -n "${PROMPT_MANIFEST}" ]]; then
+  RUN_PROMPT_ARGS+=(--prompt-manifest "${PROMPT_MANIFEST}")
+fi
+if [[ "${MAX_PROMPTS}" -gt 0 ]]; then
+  RUN_PROMPT_ARGS+=(--max-prompts "${MAX_PROMPTS}")
+fi
+
 python3 exp/h2o_v6/run_llm_demo_real_prompt.py \
-  --llm-demo "${LLM_DEMO}" \
+  "${RUN_PROMPT_ARGS[@]}" \
   --config "${BASELINE_CFG}" \
-  --prompt-dir "${PROMPT_DIR}" \
-  --prompt-pattern "${PROMPT_PATTERN}" \
-  --decode-tokens "${DECODE_TOKENS}" \
   --run-tag baseline \
   --out-dir "${BASELINE_OUT}"
 
 python3 exp/h2o_v6/run_llm_demo_real_prompt.py \
-  --llm-demo "${LLM_DEMO}" \
+  "${RUN_PROMPT_ARGS[@]}" \
   --config "${CANDIDATE_CFG}" \
-  --prompt-dir "${PROMPT_DIR}" \
-  --prompt-pattern "${PROMPT_PATTERN}" \
-  --decode-tokens "${DECODE_TOKENS}" \
   --run-tag candidate \
   --out-dir "${CANDIDATE_OUT}"
 
