@@ -1447,12 +1447,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     CPUAttention::H2OSharedState::AsyncResult result;
                     result.taskId = task.taskId;
                     if (task.fn) {
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
                         try {
                             result = task.fn();
                             result.taskId = task.taskId;
                         } catch (...) {
                             result.fallbackUsed = true;
                         }
+#else
+                        result = task.fn();
+                        result.taskId = task.taskId;
+#endif
                     } else {
                         result.fallbackUsed = true;
                     }
