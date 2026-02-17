@@ -104,7 +104,7 @@ struct KVMeta {
     int h2o_last_evict_tokens = 0;
     int h2o_total_evict_tokens = 0;
 
-    int computeReverseSize() const {
+    int computeReserveSize() const {
         int sum = 0;
         for (int i=0; i<n_reserve; ++i) {
             int reserveUnit = reserve[2*i+1];
@@ -115,6 +115,10 @@ struct KVMeta {
             sum += reserveUnit;
         }
         return sum;
+    }
+    // Compatibility alias kept for old call sites.
+    int computeReverseSize() const {
+        return computeReserveSize();
     }
 };
 #endif

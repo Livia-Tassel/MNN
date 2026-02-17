@@ -713,7 +713,7 @@ static bool decodeFp32LanePredictive(const uint8_t* data, size_t size, std::vect
     return true;
 }
 
-static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
+static bool collectKvMergedRange(CPUKVCacheManager* cacheManager,
                                  int kvNumHead,
                                  int headDim,
                                  int bytes,
@@ -731,7 +731,7 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
         || kvNumHead <= 0
         || headDim <= 0
         || bytes <= 0) {
-        return;
+        return false;
     }
 
     const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
@@ -743,13 +743,10 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
         const uint8_t* keyPtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfKey(h));
         const uint8_t* valuePtr = reinterpret_cast<const uint8_t*>(cacheManager->addrOfValue(h));
         if (keyPtr == nullptr || valuePtr == nullptr) {
-            continue;
+            return false;
         }
         keyPtrs.emplace_back(keyPtr);
         valuePtrs.emplace_back(valuePtr);
-    }
-    if (keyPtrs.empty()) {
-        return;
     }
 
     const size_t logicalBytesPerHead = (size_t)tokenCount * (size_t)headDim * (size_t)bytes;
@@ -796,6 +793,7 @@ static void collectKvMergedRange(CPUKVCacheManager* cacheManager,
             }
         }
     }
+    return true;
 }
 
 static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
@@ -1179,27 +1177,40 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             std::vector<uint8_t> keyDecoded;
             std::vector<uint8_t> valueDecoded;
             bool cacheHit = false;
-            for (auto cIt = restoreState.decodeCacheEntries.begin(); cIt != restoreState.decodeCacheEntries.end(); ++cIt) {
-                const bool shapeMatch = cIt->startToken == block.startToken
-                    && cIt->tokenCount == block.tokenCount
-                    && cIt->rawBytes == block.rawBytes
-                    && cIt->compressedBytes == block.compressedBytes;
-                if (!shapeMatch) {
-                    continue;
+            auto tryDecodeCache = [&](bool requirePosShape) {
+                for (auto cIt = restoreState.decodeCacheEntries.begin(); cIt != restoreState.decodeCacheEntries.end(); ++cIt) {
+                    if (requirePosShape) {
+                        const bool shapeMatch = cIt->startToken == block.startToken
+                            && cIt->tokenCount == block.tokenCount;
+                        if (!shapeMatch) {
+                            continue;
+                        }
+                    }
+                    const bool bytesMatch = cIt->rawBytes == block.rawBytes
+                        && cIt->compressedBytes == block.compressedBytes;
+                    if (!bytesMatch) {
+                        continue;
+                    }
+                    const bool hashMatch = (block.rawHash != 0 && cIt->rawHash == block.rawHash)
+                        || (blobHash != 0 && cIt->blobHash == blobHash);
+                    if (!hashMatch) {
+                        continue;
+                    }
+                    keyDecoded = cIt->keyDecoded;
+                    valueDecoded = cIt->valueDecoded;
+                    auto entry = std::move(*cIt);
+                    restoreState.decodeCacheEntries.erase(cIt);
+                    restoreState.decodeCacheEntries.push_back(std::move(entry));
+                    cacheHit = true;
+                    mH2OState->globalLosslessDecodeCacheHit += 1;
+                    return;
                 }
-                const bool hashMatch = (block.rawHash != 0 && cIt->rawHash == block.rawHash)
-                    || (blobHash != 0 && cIt->blobHash == blobHash);
-                if (!hashMatch) {
-                    continue;
-                }
-                keyDecoded = cIt->keyDecoded;
-                valueDecoded = cIt->valueDecoded;
-                auto entry = std::move(*cIt);
-                restoreState.decodeCacheEntries.erase(cIt);
-                restoreState.decodeCacheEntries.push_back(std::move(entry));
-                cacheHit = true;
-                mH2OState->globalLosslessDecodeCacheHit += 1;
-                break;
+            };
+            tryDecodeCache(true);
+            if (!cacheHit) {
+                // Store-mode eviction can renumber token positions; allow
+                // hash+bytes match fallback for eviction-invariant reuse.
+                tryDecodeCache(false);
             }
 
             int64_t decodeUs = 0;
@@ -1448,11 +1459,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
                     {
                         std::lock_guard<std::mutex> lock(sharedState->asyncMutex);
-                        if (sharedState->asyncRunningTasks > 0) {
-                            sharedState->asyncRunningTasks -= 1;
-                        }
-                        if (sharedState->asyncPendingTasks > 0) {
-                            sharedState->asyncPendingTasks -= 1;
+                        sharedState->asyncRunningTasks -= 1;
+                        sharedState->asyncPendingTasks -= 1;
+                        if (sharedState->asyncRunningTasks < 0 || sharedState->asyncPendingTasks < 0) {
+                            MNN_ERROR("[H2O-LOSSLESS] async counters out-of-sync: running=%lld pending=%lld\n",
+                                      (long long)sharedState->asyncRunningTasks,
+                                      (long long)sharedState->asyncPendingTasks);
+                            sharedState->asyncRunningTasks = ALIMAX<int64_t>(0, sharedState->asyncRunningTasks);
+                            sharedState->asyncPendingTasks = ALIMAX<int64_t>(0, sharedState->asyncPendingTasks);
                         }
                         sharedState->asyncCompleted.emplace_back(std::move(result));
                     }
@@ -1908,6 +1922,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                     gcore->MNNSoftmax(qkSoftmax, (float*)qkPacked, runningMax, runningSum, diffScale, seqLen, subKvSeqLen, i * mBlockKV, kvValidOffset, mPack, useMaskInSoftmax);
                     if (h2oEnabled && h2oBlockCount > 0) {
+                        // NOTE: qkSoftmax is block-local in flash-attention loop.
+                        // We intentionally use it as an online heuristic score signal
+                        // (not an exact global attention distribution).
                         const int softStride = ROUND_UP(subKvSeqLen, mPack);
                         for (int q = 0; q < seqLen; ++q) {
                             auto row = qkSoftmax + q * softStride;
@@ -2078,8 +2095,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
             int targetKeep = (int)std::ceil(targetKeepRatio * kvSeqLen);
             targetKeep = ALIMAX(1, ALIMIN(kvSeqLen, targetKeep));
+            const int targetKeepBeforeFloor = targetKeep;
             targetKeep = ALIMAX(targetKeep, keptTokens);
             mMeta->h2o_target_keep_effective = kvSeqLen > 0 ? (float)targetKeep / (float)kvSeqLen : 1.0f;
+            if (mMeta->h2o_log_stats != 0 && keptTokens > targetKeepBeforeFloor) {
+                MNN_PRINT("[H2O] floor-keep dominates target: kv=%d target=%d floor=%d (sink=%d recent=%d block=%d)\n",
+                          kvSeqLen,
+                          targetKeepBeforeFloor,
+                          keptTokens,
+                          sinkTokens,
+                          recentTokens,
+                          h2oBlockTokens);
+            }
 
             int quantizedTargetKeep = keptTokens;
             if (quantizedTargetKeep < targetKeep) {
@@ -2161,6 +2188,23 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
             mMeta->h2o_last_evict_tokens = evictedTokens;
 
+            if (evictedTokens > 0) {
+                // KV compaction renumbers kept blocks; remap EMA scores to the
+                // compacted order so next-step ranking is aligned.
+                std::vector<float> remappedScores;
+                remappedScores.reserve(h2oBlockCount);
+                for (int i = 0; i < h2oBlockCount; ++i) {
+                    if (keepBlock[i]) {
+                        remappedScores.emplace_back(scoreState.blockScores[i]);
+                    }
+                }
+                if (!remappedScores.empty()) {
+                    scoreState.blockScores.swap(remappedScores);
+                } else {
+                    scoreState.blockScores.clear();
+                }
+            }
+
             auto t1 = std::chrono::high_resolution_clock::now();
             mMeta->h2o_evict_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             if (mMeta->h2o_log_stats != 0 && mMeta->h2o_last_evict_tokens > 0) {
@@ -2232,18 +2276,23 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 return payload;
             }
             const int flashBlockKv = ALIMAX(1, mKVCacheManager->getFlashAttentionBlockKv());
-            collectKvMergedRange(
-                mKVCacheManager.get(),
-                mKvNumHead,
-                mHeadDim,
-                mBytes,
-                lP,
-                hP,
-                flashBlockKv,
-                payload.evalStart,
-                payload.evalTokens,
-                payload.keyMerged,
-                payload.valueMerged);
+            if (!collectKvMergedRange(
+                    mKVCacheManager.get(),
+                    mKvNumHead,
+                    mHeadDim,
+                    mBytes,
+                    lP,
+                    hP,
+                    flashBlockKv,
+                    payload.evalStart,
+                    payload.evalTokens,
+                    payload.keyMerged,
+                    payload.valueMerged)) {
+                payload.fallbackUsed = true;
+                payload.keyMerged.clear();
+                payload.valueMerged.clear();
+                return payload;
+            }
             payload.rawBytes = (uint64_t)payload.keyMerged.size() + (uint64_t)payload.valueMerged.size();
             if (payload.rawBytes == 0) {
                 // Empty gather is a no-op sample (no bytes to encode), not a codec failure.
@@ -2355,27 +2404,38 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 std::vector<uint8_t> keyDecoded;
                 std::vector<uint8_t> valueDecoded;
                 bool cacheHit = false;
-                for (auto it = layerState.decodeCacheEntries.begin(); it != layerState.decodeCacheEntries.end(); ++it) {
-                    const bool shapeMatch = it->startToken == block.startToken
-                        && it->tokenCount == block.tokenCount
-                        && it->rawBytes == block.rawBytes
-                        && it->compressedBytes == block.compressedBytes;
-                    if (!shapeMatch) {
-                        continue;
+                auto tryDecodeCache = [&](bool requirePosShape) {
+                    for (auto it = layerState.decodeCacheEntries.begin(); it != layerState.decodeCacheEntries.end(); ++it) {
+                        if (requirePosShape) {
+                            const bool shapeMatch = it->startToken == block.startToken
+                                && it->tokenCount == block.tokenCount;
+                            if (!shapeMatch) {
+                                continue;
+                            }
+                        }
+                        const bool bytesMatch = it->rawBytes == block.rawBytes
+                            && it->compressedBytes == block.compressedBytes;
+                        if (!bytesMatch) {
+                            continue;
+                        }
+                        const bool hashMatch = (block.rawHash != 0 && it->rawHash == block.rawHash)
+                            || (blockBlobHash != 0 && it->blobHash == blockBlobHash);
+                        if (!hashMatch) {
+                            continue;
+                        }
+                        keyDecoded = it->keyDecoded;
+                        valueDecoded = it->valueDecoded;
+                        auto entry = std::move(*it);
+                        layerState.decodeCacheEntries.erase(it);
+                        layerState.decodeCacheEntries.push_back(std::move(entry));
+                        cacheHit = true;
+                        mH2OState->globalLosslessDecodeCacheHit += 1;
+                        return;
                     }
-                    const bool hashMatch = (block.rawHash != 0 && it->rawHash == block.rawHash)
-                        || (blockBlobHash != 0 && it->blobHash == blockBlobHash);
-                    if (!hashMatch) {
-                        continue;
-                    }
-                    keyDecoded = it->keyDecoded;
-                    valueDecoded = it->valueDecoded;
-                    auto entry = std::move(*it);
-                    layerState.decodeCacheEntries.erase(it);
-                    layerState.decodeCacheEntries.push_back(std::move(entry));
-                    cacheHit = true;
-                    mH2OState->globalLosslessDecodeCacheHit += 1;
-                    break;
+                };
+                tryDecodeCache(true);
+                if (!cacheHit) {
+                    tryDecodeCache(false);
                 }
                 if (!cacheHit) {
                     auto d0 = std::chrono::high_resolution_clock::now();

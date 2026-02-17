@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <unordered_set>
+#include <cstddef>
 
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
@@ -25,6 +26,7 @@
 #include "omni.hpp"
 #include "speculative_decoding/generate.hpp"
 #include "core/MNNFileUtils.h"
+#include "core/OpCommonUtils.hpp"
 
 // 0: no debug, 1: test op time, 2: print tensor info, 3: print tensor in output
 #define DEBUG_MODE 0
@@ -44,6 +46,29 @@ void KVMeta::sync() {
     reserve = nullptr;
     remove = 0;
     add = 0;
+}
+
+static void verifyKVMetaLayoutOnce() {
+#ifdef MNN_SUPPORT_TRANSFORMER_FUSE
+    static const bool checked = []() {
+        MNN::KVMeta coreMeta;
+        MNN::Transformer::KVMeta engineMeta;
+        auto offset = [](const auto& base, const auto& field) -> ptrdiff_t {
+            return (const char*)(&field) - (const char*)(&base);
+        };
+        const bool aligned =
+            offset(coreMeta, coreMeta.h2o_enable) == offset(engineMeta, engineMeta.h2o_enable) &&
+            offset(coreMeta, coreMeta.h2o_pending_plan_ready) == offset(engineMeta, engineMeta.h2o_pending_plan_ready) &&
+            offset(coreMeta, coreMeta.h2o_lossless_decode_cache_miss) == offset(engineMeta, engineMeta.h2o_lossless_decode_cache_miss) &&
+            offset(coreMeta, coreMeta.h2o_total_evict_tokens) == offset(engineMeta, engineMeta.h2o_total_evict_tokens);
+        if (!aligned) {
+            MNN_ERROR("KVMeta layout mismatch between core::KVMeta and transformer::KVMeta.\n");
+        }
+        MNN_ASSERT(aligned);
+        return true;
+    }();
+    (void)checked;
+#endif
 }
 
 static MNNForwardType backend_type_convert(const std::string& type_str) {
@@ -68,6 +93,7 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     if (!cfg || !meta) {
         return;
     }
+    verifyKVMetaLayoutOnce();
     meta->h2o_enable = cfg->kv_h2o_enable() ? 1 : 0;
     meta->h2o_layer_start = ALIMAX(0, cfg->kv_h2o_layer_start());
     meta->h2o_layer_end = cfg->kv_h2o_layer_end();

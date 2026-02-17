@@ -43,6 +43,7 @@ static void append_metrics_jsonl(const std::string& path, int prompt_index, cons
        << ",\"h2o_lossless_decompress_us\":" << context->h2o_lossless_decompress_us
        << ",\"h2o_lossless_queue_depth_peak\":" << context->h2o_lossless_queue_depth_peak
        << ",\"h2o_lossless_fallback_count\":" << context->h2o_lossless_fallback_count
+       << ",\"h2o_lossless_backpressure_skip\":" << context->h2o_lossless_backpressure_skip_count
        << ",\"h2o_lossless_async_queue_peak\":" << context->h2o_lossless_async_queue_peak
        << ",\"h2o_lossless_async_wait_us\":" << context->h2o_lossless_async_wait_us
        << ",\"h2o_lossless_decode_cache_hit\":" << context->h2o_lossless_decode_cache_hit
