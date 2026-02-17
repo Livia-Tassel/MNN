@@ -105,6 +105,7 @@ private:
         int64_t globalLastLosslessDecompressUs = 0;
         int64_t globalLosslessQueueDepthPeak = 0;
         int64_t globalLosslessFallbackCount = 0;
+        int64_t globalLosslessBackpressureSkipCount = 0;
         int64_t globalLosslessAsyncQueuePeak = 0;
         int64_t globalLosslessAsyncWaitUs = 0;
         int64_t globalLosslessDecodeCacheHit = 0;

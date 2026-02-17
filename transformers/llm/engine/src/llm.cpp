@@ -628,6 +628,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mContext->h2o_lossless_decompress_us = mMeta->h2o_lossless_decompress_us;
     mContext->h2o_lossless_queue_depth_peak = mMeta->h2o_lossless_queue_depth_peak;
     mContext->h2o_lossless_fallback_count = mMeta->h2o_lossless_fallback_count;
+    mContext->h2o_lossless_backpressure_skip_count = mMeta->h2o_lossless_backpressure_skip_count;
     mContext->h2o_lossless_async_queue_peak = mMeta->h2o_lossless_async_queue_peak;
     mContext->h2o_lossless_async_wait_us = mMeta->h2o_lossless_async_wait_us;
     mContext->h2o_lossless_decode_cache_hit = mMeta->h2o_lossless_decode_cache_hit;
@@ -785,6 +786,7 @@ void Llm::reset() {
     mContext->h2o_lossless_decompress_us = 0;
     mContext->h2o_lossless_queue_depth_peak = 0;
     mContext->h2o_lossless_fallback_count = 0;
+    mContext->h2o_lossless_backpressure_skip_count = 0;
     mContext->h2o_lossless_async_queue_peak = 0;
     mContext->h2o_lossless_async_wait_us = 0;
     mContext->h2o_lossless_decode_cache_hit = 0;
@@ -811,6 +813,7 @@ void Llm::reset() {
     mMeta->h2o_lossless_decompress_us = 0;
     mMeta->h2o_lossless_queue_depth_peak = 0;
     mMeta->h2o_lossless_fallback_count = 0;
+    mMeta->h2o_lossless_backpressure_skip_count = 0;
     mMeta->h2o_lossless_async_queue_peak = 0;
     mMeta->h2o_lossless_async_wait_us = 0;
     mMeta->h2o_lossless_decode_cache_hit = 0;
@@ -858,6 +861,7 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mMeta->h2o_lossless_decompress_us = 0;
         mMeta->h2o_lossless_queue_depth_peak = 0;
         mMeta->h2o_lossless_fallback_count = 0;
+        mMeta->h2o_lossless_backpressure_skip_count = 0;
         mMeta->h2o_lossless_async_queue_peak = 0;
         mMeta->h2o_lossless_async_wait_us = 0;
         mMeta->h2o_lossless_decode_cache_hit = 0;

@@ -21,6 +21,7 @@ KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS="${KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS:--1}"
 KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS="${KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS:--1}"
 MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK:-8}"
 MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK:-0}"
+MAX_LOSSLESS_BACKPRESSURE_SKIP="${MAX_LOSSLESS_BACKPRESSURE_SKIP:--1}"
 MAX_LOSSLESS_DECOMP_US="${MAX_LOSSLESS_DECOMP_US:--1}"
 MAX_LOSSLESS_ASYNC_WAIT_US="${MAX_LOSSLESS_ASYNC_WAIT_US:--1}"
 REQUIRE_DECODE_CACHE_HIT="${REQUIRE_DECODE_CACHE_HIT:-0}"
@@ -44,6 +45,7 @@ echo " FULL_RUNS = ${FULL_RUNS}, STORE_RUNS = ${STORE_RUNS}"
 echo " LOSSLESS: front_interval=${KV_LOSSLESS_FRONT_SAMPLE_TOKEN_INTERVAL}, store_disable_front=${KV_LOSSLESS_STORE_DISABLE_FRONT}"
 echo " STORE_THROTTLE: bootstrap=${KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS}, grouped_step=${KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS}"
 echo " GATES: queue<=${MAX_LOSSLESS_QUEUE_PEAK}, fallback<=${MAX_LOSSLESS_FALLBACK}, decomp<=${MAX_LOSSLESS_DECOMP_US}"
+echo " GATES: backpressure_skip<=${MAX_LOSSLESS_BACKPRESSURE_SKIP}"
 echo " GATES: async_wait<=${MAX_LOSSLESS_ASYNC_WAIT_US}, require_decode_cache_hit=${REQUIRE_DECODE_CACHE_HIT}"
 echo " GATES: require_async_queue_activity=${REQUIRE_ASYNC_QUEUE_ACTIVITY}, require_decode_cache_activity=${REQUIRE_DECODE_CACHE_ACTIVITY}"
 echo " GATES: strict_runtime_metric_columns=${STRICT_RUNTIME_METRIC_COLUMNS}"
@@ -78,6 +80,7 @@ run_case() {
     STRICT_RUNTIME_METRIC_COLUMNS="${STRICT_RUNTIME_METRIC_COLUMNS}" \
     MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK}" \
     MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK}" \
+    MAX_LOSSLESS_BACKPRESSURE_SKIP="${MAX_LOSSLESS_BACKPRESSURE_SKIP}" \
     MAX_LOSSLESS_DECOMP_US="${MAX_LOSSLESS_DECOMP_US}" \
     MAX_LOSSLESS_ASYNC_WAIT_US="${MAX_LOSSLESS_ASYNC_WAIT_US}" \
     bash exp/h2o_v6/test_v6_runtime.sh > "${console_log}" 2>&1; then
@@ -141,6 +144,7 @@ obj = {
     "runtime_decomp_best_us": parse_float(gate.get("runtime_decomp_best_us", 0.0)),
     "runtime_queue_peak_best": parse_float(gate.get("runtime_queue_peak_best", 0.0)),
     "runtime_fallback_best": parse_float(gate.get("runtime_fallback_best", 0.0)),
+    "runtime_backpressure_skip_best": parse_float(gate.get("runtime_backpressure_skip_best", 0.0)),
 }
 print(json.dumps(obj, ensure_ascii=True))
 PY
@@ -190,6 +194,7 @@ for case, items in sorted(by_case.items()):
         "runtime_decomp_best_us_max": max(r["runtime_decomp_best_us"] for r in items),
         "runtime_queue_peak_best_max": max(r["runtime_queue_peak_best"] for r in items),
         "runtime_fallback_best_max": max(r["runtime_fallback_best"] for r in items),
+        "runtime_backpressure_skip_best_max": max(r["runtime_backpressure_skip_best"] for r in items),
     }
 
 out_json.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +217,7 @@ for case, info in sorted(report["cases"].items()):
     lines.append(f"- runtime_decomp_best_us_max: {info['runtime_decomp_best_us_max']:.4f}")
     lines.append(f"- runtime_queue_peak_best_max: {info['runtime_queue_peak_best_max']:.4f}")
     lines.append(f"- runtime_fallback_best_max: {info['runtime_fallback_best_max']:.4f}")
+    lines.append(f"- runtime_backpressure_skip_best_max: {info['runtime_backpressure_skip_best_max']:.4f}")
     lines.append("")
 
 lines.append("## Runs")
@@ -222,6 +228,7 @@ for idx, r in enumerate(rows, 1):
         f"overall_pass={str(r['overall_pass']).lower()}, decode={r['decode_best']:.4f}, "
         f"drop={r['decode_drop_ratio']:.6f}, decomp_us={r['runtime_decomp_best_us']:.4f}, "
         f"queue={r['runtime_queue_peak_best']:.4f}, fallback={r['runtime_fallback_best']:.4f}, "
+        f"backpressure={r['runtime_backpressure_skip_best']:.4f}, "
         f"summary=`{r['summary']}`"
     )
 

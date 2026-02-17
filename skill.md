@@ -8,6 +8,71 @@
 
 ---
 
+## 0. 最新进度更新（2026-02-17，v6/v6.1）
+
+### 0.1 v6 上线结论
+- 状态：`v6 final` 已通过，可上线。
+- 报告：`exp/h2o_v6/out_final_v6_20260216_213313/final_report.md`
+- 结果：
+  - `overall_pass: true`
+  - `runtime_cases: 3/3 pass`
+  - `m3_cases: 1/1 pass`
+  - `llm_demo_cases: 1/1 pass`
+
+### 0.2 本轮已落地的核心改动（代码）
+- Runtime 指标链路补齐（async/decode-cache）：
+  - `source/core/OpCommonUtils.hpp`
+  - `transformers/llm/engine/src/kvmeta.hpp`
+  - `transformers/llm/engine/include/llm/llm.hpp`
+  - `transformers/llm/engine/src/llm.cpp`
+  - `transformers/llm/engine/tools/llm_bench.cpp`
+- `CPUAttention` 落地单 in-flight async 编码 + decode-cache 复用与计数：
+  - `source/backend/cpu/CPUAttention.hpp`
+  - `source/backend/cpu/CPUAttention.cpp`
+- 真实 Prompt 测试链路（`llm_demo`）修复与增强：
+  - `transformers/llm/engine/demo/llm_demo.cpp`
+  - `exp/h2o_v6/run_llm_demo_real_prompt.py`
+  - `exp/h2o_v6/test_v6_llm_demo.sh`
+
+### 0.3 v6.1 第一批（已完成）
+- 门禁可靠性增强（防静默 0）：
+  - `exp/h2o_v6/analyze_h2o_v6.py` 新增：
+    - `--strict-runtime-metric-columns`
+    - `--require-async-queue-activity`
+    - `--require-decode-cache-activity`
+- 脚本透传新门禁：
+  - `exp/h2o_v6/test_v6_runtime.sh`
+  - `exp/h2o_v6/test_v6_m3.sh`
+  - `exp/h2o_v6/test_v6_final.sh`
+- 真实 Prompt 可控抽样：
+  - `exp/h2o_v6/run_llm_demo_real_prompt.py` 新增 `--prompt-manifest` / `--max-prompts`
+  - `exp/h2o_v6/test_v6_llm_demo.sh` 新增 `PROMPT_MANIFEST` / `MAX_PROMPTS`
+- 默认二进制路径防误用：
+  - `test_v6_runtime.sh` 默认优先 `./build_h2o_v6/llm_bench`
+  - `test_v6_llm_demo.sh` 默认优先 `./build_h2o_v6/llm_demo`
+
+### 0.4 v6.1 第二批（进行中）
+- 现象：开启严格列检查后，`runtime_fallback_pass` 在个别 case 失败（`fallback_best=2`）。
+- 已提交修正（待服务端复测）：
+  - `source/backend/cpu/CPUAttention.cpp`
+  - 将“压缩无收益（attempted>=raw）/空样本（rawBytes==0）”从 fallback 统计中剔除；
+  - fallback 仅保留真实异常语义（编码失败、解码失败、背压等）。
+
+### 0.5 最新服务端复测记录（2026-02-17）
+- 第一次复测：`exp/h2o_v6/out_runtime_v6_20260216_233204`
+  - `quality_status: FAIL`
+  - 根因：`runtime_metric_columns_strict=true` 下缺列（`async_queue_peak/async_wait_us/decode_cache_hit/decode_cache_miss`）。
+  - 结论：属于二进制路径误用（未使用 `build_h2o_v6/llm_bench`），非算法回退。
+- 第二次复测：`exp/h2o_v6/out_runtime_v6_20260217_125537`
+  - 指标列已完整：`runtime_metric_columns_ok: true`。
+  - 异步/缓存链路有活动：`async_queue_peak=1`、`async_wait_us=509`、`decode_cache_miss=1`。
+  - 仍失败：`runtime_fallback_pass: false`（`fallback_best=2`）。
+- 当前状态：
+  - 功能链路完整，门禁失败点已收敛到 fallback 语义；
+  - 等待 fallback 语义修正版本的 runtime/m3/final 三套复测结果归档。
+
+---
+
 ## 1. 三大目标状态（结论）
 
 ### 目标 1：前两层高低位分离无损压缩，目标 `>= 1.3`
@@ -260,8 +325,9 @@
 - 在 `llm.cpp` 会写入 `meta`，但 runtime 编码实现当前固定走 FP16/FP32 predictive 路径。
 - 若要支持多 runtime codec，需要在 `CPUAttention.cpp` 增加分派。
 
-### 8.2 `kv_lossless_async_threads` 尚未实装真正异步线程池
-- 目前是同步执行 + 队列计数模型，不是独立后台压缩线程。
+### 8.2 `kv_lossless_async_threads` 现状（v6）
+- 已实装单 in-flight 异步编码（`std::async`），并有 `async_queue_peak/async_wait_us` 指标。
+- 当前仍不是完整线程池模型；`>1` 线程配置暂未提供等价多并发收益。
 
 ### 8.3 predictor 能力线上/离线不完全一致
 - 离线 `adaptive_v22` 支持 `pair_delta`、`pair_delta_delta_seq`。
@@ -289,22 +355,22 @@
 
 ---
 
-## 10. v6 建议目标（收官阶段）
+## 10. v6.1 建议目标（当前阶段）
 
 ### P0（必须）
-1. 冻结 v5 默认参数并固化到 `target_core_gate_v5.json`/运行脚本默认值。  
-2. 用 `test_v5_final.sh` 做一次最终验收基线归档。  
-3. 补齐真实 prompt 集回归（短/中/长上下文，含多轮对话）。
+1. 完成 `CPUAttention` fallback 语义修正后的复测归档（runtime/m3/final）。  
+2. 将 `runtime_metric_columns_strict=true` 作为默认上线门禁保留。  
+3. 形成“默认发布参数 + 回退参数”双配置文档（含触发条件）。
 
 ### P1（强烈建议）
-1. 为 `store` 模式单独设定更明确的 `decomp_us` 预算（按 p95/p99）。  
-2. 打通 runtime codec 分派（让 `kv_lossless_codec_runtime` 真正生效）。  
-3. 对齐 predictor 集（runtime 也支持 `pair_delta*`，或离线降配以保持一致）。
+1. 为 `store` 模式补 p95/p99 预算门禁（不仅看均值/best）。  
+2. 扩展 m3/final 报告字段，纳入新门禁（metric columns/activity）趋势统计。  
+3. 固化 `llm_demo` 分层样本集（短/中/长、指令/QA/多轮）并建立定期回归清单。
 
 ### P2（优化项）
-1. 实装真正异步压缩线程池（使用 `kv_lossless_async_threads`）。  
-2. 增加恢复命中缓存策略，进一步降低 store 恢复抖动。  
-3. 引入质量维度评估（PPL/任务准确率）作为压缩收益边界。
+1. 评估真正线程池化异步压缩（`kv_lossless_async_threads > 1`）的收益与复杂度。  
+2. 继续优化 decode cache 命中率与淘汰策略，降低长上下文恢复开销。  
+3. 引入质量指标（PPL/任务准确率）作为压缩收益边界。
 
 ---
 

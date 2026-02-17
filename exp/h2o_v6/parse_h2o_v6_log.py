@@ -84,6 +84,7 @@ def main():
         "h2o_lossless_decomp_us",
         "h2o_lossless_queue_peak",
         "h2o_lossless_fallback",
+        "h2o_lossless_backpressure_skip",
         "h2o_lossless_async_queue_peak",
         "h2o_lossless_async_wait_us",
         "h2o_lossless_decode_cache_hit",

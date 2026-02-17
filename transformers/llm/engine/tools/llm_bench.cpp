@@ -189,6 +189,7 @@ struct TestInstance {
     std::vector<double>      h2oLosslessDecompUs;
     std::vector<double>      h2oLosslessQueuePeak;
     std::vector<double>      h2oLosslessFallback;
+    std::vector<double>      h2oLosslessBackpressureSkip;
     std::vector<double>      h2oLosslessAsyncQueuePeak;
     std::vector<double>      h2oLosslessAsyncWaitUs;
     std::vector<double>      h2oLosslessDecodeCacheHit;
@@ -251,6 +252,7 @@ struct TestInstance {
             || field == "h2o_lossless_decomp_us"
             || field == "h2o_lossless_queue_peak"
             || field == "h2o_lossless_fallback"
+            || field == "h2o_lossless_backpressure_skip"
             || field == "h2o_lossless_async_queue_peak"
             || field == "h2o_lossless_async_wait_us"
             || field == "h2o_lossless_decode_cache_hit"
@@ -387,6 +389,7 @@ struct markdownPrinter : public Printer {
             fields.emplace_back("h2o_lossless_decomp_us");
             fields.emplace_back("h2o_lossless_queue_peak");
             fields.emplace_back("h2o_lossless_fallback");
+            fields.emplace_back("h2o_lossless_backpressure_skip");
             fields.emplace_back("h2o_lossless_async_queue_peak");
             fields.emplace_back("h2o_lossless_async_wait_us");
             fields.emplace_back("h2o_lossless_decode_cache_hit");
@@ -489,6 +492,9 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "h2o_lossless_fallback") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessFallback), t.getStdevUs(t.h2oLosslessFallback));
+                value = buf;
+            } else if (field == "h2o_lossless_backpressure_skip") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessBackpressureSkip), t.getStdevUs(t.h2oLosslessBackpressureSkip));
                 value = buf;
             } else if (field == "h2o_lossless_async_queue_peak") {
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessAsyncQueuePeak), t.getStdevUs(t.h2oLosslessAsyncQueuePeak));
@@ -764,6 +770,12 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.h2oLosslessFallback));
                 writer.Key("h2o_lossless_fallback_std");
                 writer.Double(inst.getStdevUs(inst.h2oLosslessFallback));
+            }
+            if (!inst.h2oLosslessBackpressureSkip.empty()) {
+                writer.Key("h2o_lossless_backpressure_skip");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessBackpressureSkip));
+                writer.Key("h2o_lossless_backpressure_skip_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessBackpressureSkip));
             }
             if (!inst.h2oLosslessAsyncQueuePeak.empty()) {
                 writer.Key("h2o_lossless_async_queue_peak");
@@ -1472,6 +1484,7 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
                     t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessBackpressureSkip.push_back((double)context->h2o_lossless_backpressure_skip_count);
                     t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
                     t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
                     t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);
@@ -1519,6 +1532,7 @@ int main(int argc, char ** argv) {
                     t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
                     t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
                     t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessBackpressureSkip.push_back((double)context->h2o_lossless_backpressure_skip_count);
                     t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
                     t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
                     t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);

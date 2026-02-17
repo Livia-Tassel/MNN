@@ -79,6 +79,12 @@ def main():
         help="Optional gate: require runtime fallback count <= target (negative disables).",
     )
     parser.add_argument(
+        "--max-lossless-backpressure-skip",
+        type=float,
+        default=-1.0,
+        help="Optional gate: require runtime backpressure skip count <= target (negative disables).",
+    )
+    parser.add_argument(
         "--max-lossless-decomp-us",
         type=float,
         default=-1.0,
@@ -122,6 +128,7 @@ def main():
         "h2o_lossless_decomp_us",
         "h2o_lossless_queue_peak",
         "h2o_lossless_fallback",
+        "h2o_lossless_backpressure_skip",
         "h2o_lossless_async_queue_peak",
         "h2o_lossless_async_wait_us",
         "h2o_lossless_decode_cache_hit",
@@ -160,6 +167,7 @@ def main():
             row["_h2o_lossless_decomp_us"] = parse_float(row.get("h2o_lossless_decomp_us", "0"))
             row["_h2o_lossless_queue_peak"] = parse_float(row.get("h2o_lossless_queue_peak", "0"))
             row["_h2o_lossless_fallback"] = parse_float(row.get("h2o_lossless_fallback", "0"))
+            row["_h2o_lossless_backpressure_skip"] = parse_float(row.get("h2o_lossless_backpressure_skip", "0"))
             row["_h2o_lossless_async_queue_peak"] = parse_float(row.get("h2o_lossless_async_queue_peak", "0"))
             row["_h2o_lossless_async_wait_us"] = parse_float(row.get("h2o_lossless_async_wait_us", "0"))
             row["_h2o_lossless_decode_cache_hit"] = parse_float(row.get("h2o_lossless_decode_cache_hit", "0"))
@@ -184,6 +192,7 @@ def main():
     avg_lossless_decomp_us = sum(r["_h2o_lossless_decomp_us"] for r in rows) / len(rows)
     avg_lossless_queue_peak = sum(r["_h2o_lossless_queue_peak"] for r in rows) / len(rows)
     avg_lossless_fallback = sum(r["_h2o_lossless_fallback"] for r in rows) / len(rows)
+    avg_lossless_backpressure_skip = sum(r["_h2o_lossless_backpressure_skip"] for r in rows) / len(rows)
     avg_lossless_async_queue_peak = sum(r["_h2o_lossless_async_queue_peak"] for r in rows) / len(rows)
     avg_lossless_async_wait_us = sum(r["_h2o_lossless_async_wait_us"] for r in rows) / len(rows)
     avg_lossless_decode_cache_hit = sum(r["_h2o_lossless_decode_cache_hit"] for r in rows) / len(rows)
@@ -232,6 +241,7 @@ def main():
     runtime_decomp_best = max(r["_h2o_lossless_decomp_us"] for r in rows)
     runtime_queue_peak_best = max(r["_h2o_lossless_queue_peak"] for r in rows)
     runtime_fallback_best = max(r["_h2o_lossless_fallback"] for r in rows)
+    runtime_backpressure_skip_best = max(r["_h2o_lossless_backpressure_skip"] for r in rows)
     runtime_async_queue_peak_best = max(r["_h2o_lossless_async_queue_peak"] for r in rows)
     runtime_async_wait_best = max(r["_h2o_lossless_async_wait_us"] for r in rows)
     runtime_decode_cache_hit_best = max(r["_h2o_lossless_decode_cache_hit"] for r in rows)
@@ -271,6 +281,7 @@ def main():
     )
     queue_peak_gate_enabled = args.max_lossless_queue_peak >= 0.0
     fallback_gate_enabled = args.max_lossless_fallback >= 0.0
+    backpressure_skip_gate_enabled = args.max_lossless_backpressure_skip >= 0.0
     runtime_queue_peak_pass = (
         runtime_queue_peak_best <= args.max_lossless_queue_peak
         if queue_peak_gate_enabled
@@ -279,6 +290,11 @@ def main():
     runtime_fallback_pass = (
         runtime_fallback_best <= args.max_lossless_fallback
         if fallback_gate_enabled
+        else True
+    )
+    runtime_backpressure_skip_pass = (
+        runtime_backpressure_skip_best <= args.max_lossless_backpressure_skip
+        if backpressure_skip_gate_enabled
         else True
     )
     decode_drop_ratio = 0.0
@@ -298,6 +314,7 @@ def main():
         and runtime_decode_cache_activity_pass
         and runtime_queue_peak_pass
         and runtime_fallback_pass
+        and runtime_backpressure_skip_pass
     )
 
     out_path = Path(args.out)
@@ -326,6 +343,7 @@ def main():
         f.write(f"- Avg lossless decomp us: {avg_lossless_decomp_us:.2f}\n")
         f.write(f"- Avg lossless queue peak: {avg_lossless_queue_peak:.2f}\n")
         f.write(f"- Avg lossless fallback: {avg_lossless_fallback:.2f}\n\n")
+        f.write(f"- Avg lossless backpressure skip: {avg_lossless_backpressure_skip:.2f}\n\n")
         f.write(f"- Avg lossless async queue peak: {avg_lossless_async_queue_peak:.2f}\n")
         f.write(f"- Avg lossless async wait us: {avg_lossless_async_wait_us:.2f}\n")
         f.write(f"- Avg lossless decode cache hit: {avg_lossless_decode_cache_hit:.2f}\n")
@@ -419,6 +437,7 @@ def main():
         )
         f.write(f"- runtime_queue_peak_best: {runtime_queue_peak_best:.4f}\n")
         f.write(f"- runtime_fallback_best: {runtime_fallback_best:.4f}\n")
+        f.write(f"- runtime_backpressure_skip_best: {runtime_backpressure_skip_best:.4f}\n")
         f.write(f"- runtime_queue_peak_gate_enabled: {format_gate_bool(queue_peak_gate_enabled)}\n")
         if queue_peak_gate_enabled:
             f.write(f"- runtime_queue_peak_target: {args.max_lossless_queue_peak:.4f}\n")
@@ -427,6 +446,19 @@ def main():
         if fallback_gate_enabled:
             f.write(f"- runtime_fallback_target: {args.max_lossless_fallback:.4f}\n")
         f.write(f"- runtime_fallback_pass: {format_gate_bool(runtime_fallback_pass)}\n")
+        f.write(
+            f"- runtime_backpressure_skip_gate_enabled: "
+            f"{format_gate_bool(backpressure_skip_gate_enabled)}\n"
+        )
+        if backpressure_skip_gate_enabled:
+            f.write(
+                f"- runtime_backpressure_skip_target: "
+                f"{args.max_lossless_backpressure_skip:.4f}\n"
+            )
+        f.write(
+            f"- runtime_backpressure_skip_pass: "
+            f"{format_gate_bool(runtime_backpressure_skip_pass)}\n"
+        )
         f.write(f"- runtime_decomp_pass: {format_gate_bool(runtime_decomp_pass)}\n")
         f.write(f"- overall_pass: {format_gate_bool(overall_pass)}\n")
         if args.decode_baseline > 0.0:

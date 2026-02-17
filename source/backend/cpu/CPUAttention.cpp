@@ -1351,6 +1351,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mH2OState->globalLastLosslessDecompressUs = 0;
         mH2OState->globalLosslessQueueDepthPeak = 0;
         mH2OState->globalLosslessFallbackCount = 0;
+        mH2OState->globalLosslessBackpressureSkipCount = 0;
         mH2OState->globalLosslessAsyncQueuePeak = 0;
         mH2OState->globalLosslessAsyncWaitUs = 0;
         mH2OState->globalLosslessDecodeCacheHit = 0;
@@ -2348,6 +2349,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mH2OState->globalLastLosslessCompressUs = targetLayerState.losslessCompressUs;
                 mH2OState->globalLastLosslessDecompressUs = targetLayerState.losslessDecompressUs;
                 mH2OState->globalLosslessFallbackCount = targetLayerState.losslessFallbackCount;
+                mH2OState->globalLosslessBackpressureSkipCount =
+                    targetLayerState.losslessBackpressureSkipCount;
                 if (targetLayerState.losslessCompressedBytes > 0 && targetLayerState.losslessRawBytes > 0) {
                     mH2OState->globalLastLosslessRatio =
                         (float)((double)targetLayerState.losslessRawBytes / (double)targetLayerState.losslessCompressedBytes);
@@ -2576,7 +2579,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 const int64_t pending = countPendingBlocks(layerState) + (mH2OState->asyncFutureValid ? 1 : 0);
                 if (pending >= maxQueue) {
                     LosslessRuntimeStats stats;
-                    stats.fallbackUsed = true;
+                    // Backpressure skip is a scheduling throttle, not a codec fallback failure.
+                    stats.fallbackUsed = false;
                     stats.backpressureSkipped = true;
                     layerState.losslessBackpressureSkipCount += 1;
                     applyEncodedStatsToLayer(
@@ -2600,7 +2604,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                     if (mH2OState->asyncFutureValid) {
                         LosslessRuntimeStats stats;
-                        stats.fallbackUsed = true;
+                        // Existing async worker is still busy; classify as backpressure only.
+                        stats.fallbackUsed = false;
                         stats.backpressureSkipped = true;
                         layerState.losslessBackpressureSkipCount += 1;
                         applyEncodedStatsToLayer(
@@ -2648,7 +2653,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                                     asyncStats.rawBytes = payload.rawBytes;
                                     asyncStats.rawHash = payload.rawHash;
                                     if (payload.fallbackUsed || payload.rawBytes == 0) {
-                                        asyncStats.fallbackUsed = true;
+                                        // rawBytes==0 is a benign no-op payload; only keep real fallback flags.
+                                        asyncStats.fallbackUsed = payload.fallbackUsed;
                                         return asyncStats;
                                     }
                                     auto c0 = std::chrono::high_resolution_clock::now();
@@ -2720,7 +2726,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     if (!stats.fallbackUsed) {
                         const int64_t pendingNow = countPendingBlocks(layerState);
                         if (pendingNow >= maxQueue) {
-                            stats.fallbackUsed = true;
+                            // Sync path backpressure: keep as throttle signal, not fallback failure.
+                            stats.fallbackUsed = false;
                             stats.backpressureSkipped = true;
                             stats.compressedBytes = stats.rawBytes;
                             stats.ratio = 1.0f;
@@ -2753,6 +2760,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         int64_t totalCompressUs = 0;
         int64_t totalDecompressUs = 0;
         int64_t totalFallbackCount = 0;
+        int64_t totalBackpressureSkipCount = 0;
         const int losslessScope = mMeta->h2o_lossless_scope;
         const int frontN = ALIMAX(0, mMeta->h2o_lossless_front_n);
         bool hasIncludedLayer = false;
@@ -2779,6 +2787,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             totalCompressUs += layerState.losslessCompressUs;
             totalDecompressUs += layerState.losslessDecompressUs;
             totalFallbackCount += layerState.losslessFallbackCount;
+            totalBackpressureSkipCount += layerState.losslessBackpressureSkipCount;
         }
 
         // Safety fallback: if scope-filtered selection yields no valid layer,
@@ -2790,6 +2799,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             totalCompressUs = 0;
             totalDecompressUs = 0;
             totalFallbackCount = 0;
+            totalBackpressureSkipCount = 0;
             for (int i = 0; i < (int)mH2OState->layerStates.size(); ++i) {
                 const auto& layerState = mH2OState->layerStates[i];
                 if (layerState.losslessUpdateCount <= 0) {
@@ -2801,9 +2811,11 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 totalCompressUs += layerState.losslessCompressUs;
                 totalDecompressUs += layerState.losslessDecompressUs;
                 totalFallbackCount += layerState.losslessFallbackCount;
+                totalBackpressureSkipCount += layerState.losslessBackpressureSkipCount;
             }
         }
 
+        mH2OState->globalLosslessBackpressureSkipCount = totalBackpressureSkipCount;
         if (totalRawBytes > 0 && totalCompressedBytes > 0) {
             mH2OState->globalLastLosslessRawBytes = totalRawBytes;
             mH2OState->globalLastLosslessCompressedBytes = totalCompressedBytes;
@@ -2838,6 +2850,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mMeta->h2o_lossless_async_wait_us = mH2OState->globalLosslessAsyncWaitUs;
         mMeta->h2o_lossless_decode_cache_hit = mH2OState->globalLosslessDecodeCacheHit;
         mMeta->h2o_lossless_decode_cache_miss = mH2OState->globalLosslessDecodeCacheMiss;
+        mMeta->h2o_lossless_backpressure_skip_count = mH2OState->globalLosslessBackpressureSkipCount;
     }
 
     backend()->onReleaseBuffer(unpackQK.get(), Backend::STATIC);

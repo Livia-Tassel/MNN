@@ -16,6 +16,7 @@ REPORT_JSON="${BASE_OUT}/final_report.json"
 
 MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK:-8}"
 MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK:-0}"
+MAX_LOSSLESS_BACKPRESSURE_SKIP="${MAX_LOSSLESS_BACKPRESSURE_SKIP:--1}"
 FULL_DECOMP_BUDGET_US="${FULL_DECOMP_BUDGET_US:-30000}"
 STORE_DECOMP_BUDGET_US="${STORE_DECOMP_BUDGET_US:-70000}"
 COVERAGE_DECOMP_BUDGET_US="${COVERAGE_DECOMP_BUDGET_US:-70000}"
@@ -43,6 +44,7 @@ echo "============================================================"
 echo "Gate policy:"
 echo "  queue_peak <= ${MAX_LOSSLESS_QUEUE_PEAK}"
 echo "  fallback   <= ${MAX_LOSSLESS_FALLBACK}"
+echo "  backpressure_skip <= ${MAX_LOSSLESS_BACKPRESSURE_SKIP}"
 echo "  full decomp budget us      = ${FULL_DECOMP_BUDGET_US}"
 echo "  store decomp budget us     = ${STORE_DECOMP_BUDGET_US}"
 echo "  coverage decomp budget us  = ${COVERAGE_DECOMP_BUDGET_US}"
@@ -105,6 +107,7 @@ row = {
     "runtime_decomp_best_us": parse_float(gate.get("runtime_decomp_best_us", 0.0)),
     "runtime_queue_peak_best": parse_float(gate.get("runtime_queue_peak_best", 0.0)),
     "runtime_fallback_best": parse_float(gate.get("runtime_fallback_best", 0.0)),
+    "runtime_backpressure_skip_best": parse_float(gate.get("runtime_backpressure_skip_best", 0.0)),
 }
 print(json.dumps(row, ensure_ascii=True))
 PY
@@ -131,6 +134,7 @@ run_runtime_case() {
     STRICT_RUNTIME_METRIC_COLUMNS="${STRICT_RUNTIME_METRIC_COLUMNS}" \
     MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK}" \
     MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK}" \
+    MAX_LOSSLESS_BACKPRESSURE_SKIP="${MAX_LOSSLESS_BACKPRESSURE_SKIP}" \
     MAX_LOSSLESS_ASYNC_WAIT_US="${MAX_LOSSLESS_ASYNC_WAIT_US}" \
     "${extra_env[@]}" \
     bash exp/h2o_v6/test_v6_runtime.sh > "${console_log}" 2>&1; then
@@ -170,6 +174,7 @@ run_m3_case() {
     STRICT_RUNTIME_METRIC_COLUMNS="${STRICT_RUNTIME_METRIC_COLUMNS}" \
     MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK}" \
     MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK}" \
+    MAX_LOSSLESS_BACKPRESSURE_SKIP="${MAX_LOSSLESS_BACKPRESSURE_SKIP}" \
     MAX_LOSSLESS_DECOMP_US="${M3_DECOMP_BUDGET_US}" \
     MAX_LOSSLESS_ASYNC_WAIT_US="${MAX_LOSSLESS_ASYNC_WAIT_US}" \
     bash exp/h2o_v6/test_v6_m3.sh > "${console_log}" 2>&1; then
@@ -347,6 +352,7 @@ if runtime_rows:
             f"lossy={r['lossy_best']:.4f}, lossless_online={r['lossless_online_value']:.4f}, "
             f"decomp_us={r['runtime_decomp_best_us']:.4f}, "
             f"queue={r['runtime_queue_peak_best']:.4f}, fallback={r['runtime_fallback_best']:.4f}, "
+            f"backpressure={r['runtime_backpressure_skip_best']:.4f}, "
             f"summary=`{r['summary']}`"
         )
     lines.append("")
