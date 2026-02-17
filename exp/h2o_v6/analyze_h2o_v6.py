@@ -141,6 +141,10 @@ def main():
                 "[WARN] runtime metric columns missing in CSV: "
                 + ", ".join(missing_runtime_metric_columns)
             )
+            print(
+                "[WARN] likely using an older llm_bench binary/log format; "
+                "rebuild and use the expected v6 llm_bench."
+            )
         for row in reader:
             row["_h2o_keep"] = parse_float(row.get("h2o_keep", "0"))
             row["_h2o_lossy"] = parse_float(row.get("h2o_lossy", "0"))

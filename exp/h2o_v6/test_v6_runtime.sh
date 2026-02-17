@@ -13,7 +13,13 @@ set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 MODEL_CONFIG="${MODEL_CONFIG:-/home10T/ljq/mnn_data/models/llama2_mnn/config.json}"
-LLM_BENCH="${LLM_BENCH:-./build/llm_bench}"
+if [[ -z "${LLM_BENCH:-}" ]]; then
+  if [[ -x "./build_h2o_v6/llm_bench" ]]; then
+    LLM_BENCH="./build_h2o_v6/llm_bench"
+  else
+    LLM_BENCH="./build/llm_bench"
+  fi
+fi
 DUMP_DIR="${DUMP_DIR:-/home10T/ljq/MNN/exp/gear_fp16/dumps_fp16}"
 OUT="${OUT:-exp/h2o_v6/out_runtime_v6_$(date +%Y%m%d_%H%M%S)}"
 BENCH_STDOUT_LOG="${OUT}/bench_stdout.log"
@@ -80,6 +86,7 @@ STEP0_FAIL=0
 echo "============================================================"
 echo " H2O v6 Runtime Validation"
 echo " OUT = ${OUT}"
+echo " LLM_BENCH = ${LLM_BENCH}"
 echo "============================================================"
 mkdir -p "${OUT}"
 
