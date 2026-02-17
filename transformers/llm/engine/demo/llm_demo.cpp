@@ -48,6 +48,8 @@ static void append_metrics_jsonl(const std::string& path, int prompt_index, cons
        << ",\"h2o_lossless_async_wait_us\":" << context->h2o_lossless_async_wait_us
        << ",\"h2o_lossless_decode_cache_hit\":" << context->h2o_lossless_decode_cache_hit
        << ",\"h2o_lossless_decode_cache_miss\":" << context->h2o_lossless_decode_cache_miss
+       << ",\"h2o_last_evict_tokens\":" << context->h2o_last_evict_tokens
+       << ",\"h2o_total_evict_tokens\":" << context->h2o_total_evict_tokens
        << "}\n";
 }
 

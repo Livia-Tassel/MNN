@@ -2196,6 +2196,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             if (evictedTokens > 0) {
                 // KV compaction renumbers kept blocks; remap EMA scores to the
                 // compacted order so next-step ranking is aligned.
+                // NOTE: The remapped count (kept blocks) may differ from the new
+                // h2oBlockCount after compaction, because partial blocks from
+                // different kept ranges can merge under new block boundaries.
+                // The resize at line ~2049 handles the size mismatch (truncation
+                // or zero-extension), and EMA alpha=0.9 self-corrects within a
+                // few steps, so this approximation is acceptable.
                 std::vector<float> remappedScores;
                 remappedScores.reserve(h2oBlockCount);
                 for (int i = 0; i < h2oBlockCount; ++i) {
@@ -2802,6 +2808,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 // Consume one pending decode before a shrink-triggered clear so we do
                 // not silently drop undecoded runtime blocks.
                 decodeOnePendingLosslessBlock(layerState);
+                // Count remaining undecoded blocks that will be discarded by clear().
+                const int64_t discardedUndecoded = countPendingBlocks(layerState);
+                if (discardedUndecoded > 0) {
+                    layerState.losslessFallbackCount += discardedUndecoded;
+                    MNN_PRINT("[H2O-LOSSLESS] shrink: discarding %lld undecoded blocks\n", (long long)discardedUndecoded);
+                }
                 // Compressible cold budget shrank (eviction or hot-window shift).
                 // Reset cold-window watermark so delta tracking works going forward,
                 // while preserving accumulated byte/ratio stats for aggregation.
@@ -3185,6 +3197,10 @@ CPUAttention::CPUAttention(Backend *backend, bool kv_cache) : Execution(backend)
         auto it = sH2OStateByMeta.find(key);
         if (it != sH2OStateByMeta.end()) {
             mH2OState = it->second.lock();
+            if (!mH2OState) {
+                // Stale entry — weak_ptr expired; remove before reinserting.
+                sH2OStateByMeta.erase(it);
+            }
         }
         if (!mH2OState) {
             mH2OState.reset(new H2OSharedState);

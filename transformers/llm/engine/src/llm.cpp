@@ -53,7 +53,9 @@ static void verifyKVMetaLayoutOnce() {
     static const bool checked = []() {
         const bool aligned =
             offsetof(MNN::KVMeta, h2o_enable) == offsetof(MNN::Transformer::KVMeta, h2o_enable) &&
+            offsetof(MNN::KVMeta, h2o_lossless_enable) == offsetof(MNN::Transformer::KVMeta, h2o_lossless_enable) &&
             offsetof(MNN::KVMeta, h2o_pending_plan_ready) == offsetof(MNN::Transformer::KVMeta, h2o_pending_plan_ready) &&
+            offsetof(MNN::KVMeta, h2o_pending_remove) == offsetof(MNN::Transformer::KVMeta, h2o_pending_remove) &&
             offsetof(MNN::KVMeta, h2o_lossless_decode_cache_miss) == offsetof(MNN::Transformer::KVMeta, h2o_lossless_decode_cache_miss) &&
             offsetof(MNN::KVMeta, h2o_total_evict_tokens) == offsetof(MNN::Transformer::KVMeta, h2o_total_evict_tokens);
         if (!aligned) {
