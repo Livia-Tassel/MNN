@@ -2081,7 +2081,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 payload.valueMerged);
             payload.rawBytes = (uint64_t)payload.keyMerged.size() + (uint64_t)payload.valueMerged.size();
             if (payload.rawBytes == 0) {
-                payload.fallbackUsed = true;
+                // Empty gather is a no-op sample (no bytes to encode), not a codec failure.
+                // Keep fallback=false to avoid tripping runtime fallback gate on benign skips.
+                payload.fallbackUsed = false;
                 return payload;
             }
             if (strictRoundtrip) {
@@ -2146,7 +2148,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             stats.attemptedCompressedBytes = attemptedBytes;
             stats.attemptedRatio = static_cast<float>((double)payload.rawBytes / (double)attemptedBytes);
             if (attemptedBytes >= payload.rawBytes) {
-                stats.fallbackUsed = true;
+                // Compression is not beneficial for this block; treat as a normal no-gain path.
+                // Keep fallback=false so fallback metrics reflect actual runtime errors only.
+                stats.fallbackUsed = false;
                 stats.keyBlob.clear();
                 stats.valueBlob.clear();
                 stats.compressedBytes = stats.rawBytes;
@@ -2612,7 +2616,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         auto payload = collectLosslessRuntimePayload(evalStartToken, evalTokenCount);
                         if (payload.fallbackUsed || payload.rawBytes == 0) {
                             LosslessRuntimeStats stats;
-                            stats.fallbackUsed = payload.fallbackUsed || payload.rawBytes == 0;
+                            // rawBytes==0 is a benign no-op sample; only propagate real fallback flags.
+                            stats.fallbackUsed = payload.fallbackUsed;
                             applyEncodedStatsToLayer(
                                 layerIndex,
                                 evalStartToken,
@@ -2680,11 +2685,23 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                                         return asyncStats;
                                     }
                                     const uint64_t attemptedBytes = (uint64_t)asyncStats.keyBlob.size() + (uint64_t)asyncStats.valueBlob.size();
-                                    if (attemptedBytes == 0 || attemptedBytes >= asyncStats.rawBytes) {
+                                    if (attemptedBytes == 0) {
                                         asyncStats.fallbackUsed = true;
                                         asyncStats.compressedBytes = asyncStats.rawBytes;
                                         asyncStats.attemptedCompressedBytes = asyncStats.rawBytes;
                                         asyncStats.attemptedRatio = 1.0f;
+                                        asyncStats.ratio = 1.0f;
+                                        asyncStats.keyBlob.clear();
+                                        asyncStats.valueBlob.clear();
+                                        return asyncStats;
+                                    }
+                                    if (attemptedBytes >= asyncStats.rawBytes) {
+                                        // No-gain compression path: keep raw bytes without counting fallback.
+                                        asyncStats.fallbackUsed = false;
+                                        asyncStats.compressedBytes = asyncStats.rawBytes;
+                                        asyncStats.attemptedCompressedBytes = attemptedBytes;
+                                        asyncStats.attemptedRatio =
+                                            static_cast<float>((double)asyncStats.rawBytes / (double)attemptedBytes);
                                         asyncStats.ratio = 1.0f;
                                         asyncStats.keyBlob.clear();
                                         asyncStats.valueBlob.clear();
