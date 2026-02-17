@@ -1,0 +1,6 @@
+# Runtime outputs
+out_*/
+
+# Python cache
+__pycache__/
+*.pyc
