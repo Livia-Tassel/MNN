@@ -1465,8 +1465,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             MNN_ERROR("[H2O-LOSSLESS] async counters out-of-sync: running=%lld pending=%lld\n",
                                       (long long)sharedState->asyncRunningTasks,
                                       (long long)sharedState->asyncPendingTasks);
-                            sharedState->asyncRunningTasks = ALIMAX<int64_t>(0, sharedState->asyncRunningTasks);
-                            sharedState->asyncPendingTasks = ALIMAX<int64_t>(0, sharedState->asyncPendingTasks);
+                            sharedState->asyncRunningTasks = std::max<int64_t>(0, sharedState->asyncRunningTasks);
+                            sharedState->asyncPendingTasks = std::max<int64_t>(0, sharedState->asyncPendingTasks);
                         }
                         sharedState->asyncCompleted.emplace_back(std::move(result));
                     }
@@ -2900,7 +2900,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             task.taskId = ++mH2OState->asyncTaskSerial;
                         }
                         auto payloadForAsync = std::make_shared<LosslessCollectPayload>(std::move(payload));
-                        task.fn = [payloadForAsync, layerIndex, runtimeStoreModeLocal, bytes = mBytes, keyFlags, valueFlags]() mutable {
+                        const int bytes = mBytes;
+                        task.fn = [payloadForAsync, layerIndex, runtimeStoreModeLocal, bytes, keyFlags, valueFlags]() mutable {
                             auto& payload = *payloadForAsync;
                             CPUAttention::H2OSharedState::AsyncResult asyncStats;
                             asyncStats.layerIndex = layerIndex;
