@@ -51,16 +51,11 @@ void KVMeta::sync() {
 static void verifyKVMetaLayoutOnce() {
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
     static const bool checked = []() {
-        MNN::KVMeta coreMeta;
-        MNN::Transformer::KVMeta engineMeta;
-        auto offset = [](const auto& base, const auto& field) -> ptrdiff_t {
-            return (const char*)(&field) - (const char*)(&base);
-        };
         const bool aligned =
-            offset(coreMeta, coreMeta.h2o_enable) == offset(engineMeta, engineMeta.h2o_enable) &&
-            offset(coreMeta, coreMeta.h2o_pending_plan_ready) == offset(engineMeta, engineMeta.h2o_pending_plan_ready) &&
-            offset(coreMeta, coreMeta.h2o_lossless_decode_cache_miss) == offset(engineMeta, engineMeta.h2o_lossless_decode_cache_miss) &&
-            offset(coreMeta, coreMeta.h2o_total_evict_tokens) == offset(engineMeta, engineMeta.h2o_total_evict_tokens);
+            offsetof(MNN::KVMeta, h2o_enable) == offsetof(MNN::Transformer::KVMeta, h2o_enable) &&
+            offsetof(MNN::KVMeta, h2o_pending_plan_ready) == offsetof(MNN::Transformer::KVMeta, h2o_pending_plan_ready) &&
+            offsetof(MNN::KVMeta, h2o_lossless_decode_cache_miss) == offsetof(MNN::Transformer::KVMeta, h2o_lossless_decode_cache_miss) &&
+            offsetof(MNN::KVMeta, h2o_total_evict_tokens) == offsetof(MNN::Transformer::KVMeta, h2o_total_evict_tokens);
         if (!aligned) {
             MNN_ERROR("KVMeta layout mismatch between core::KVMeta and transformer::KVMeta.\n");
         }
