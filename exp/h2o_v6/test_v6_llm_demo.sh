@@ -263,6 +263,15 @@ decode_drop_ratio = 0.0
 if baseline_decode > 0:
     decode_drop_ratio = (baseline_decode - candidate_decode) / baseline_decode
 
+baseline_keep_ratio_avg = float(baseline.get("h2o_keep_ratio_avg", 0.0))
+baseline_lossy_ratio_avg = float(baseline.get("h2o_lossy_ratio_avg", 0.0))
+baseline_lossless_ratio_avg = float(baseline.get("h2o_lossless_ratio_avg", 0.0))
+baseline_total_ratio_avg = float(baseline.get("h2o_runtime_total_ratio_avg", 0.0))
+candidate_keep_ratio_avg = float(candidate.get("h2o_keep_ratio_avg", 0.0))
+candidate_lossy_ratio_avg = float(candidate.get("h2o_lossy_ratio_avg", 0.0))
+candidate_lossless_ratio_avg = float(candidate.get("h2o_lossless_ratio_avg", 0.0))
+candidate_total_ratio_avg = float(candidate.get("h2o_runtime_total_ratio_avg", 0.0))
+
 decode_pass = decode_drop_ratio <= decode_drop_target
 runtime_decomp_best = float(candidate.get("runtime_decomp_us_max", 0.0))
 runtime_decomp_pass = (runtime_decomp_best > 0.0) if require_runtime_decomp else True
@@ -286,6 +295,14 @@ report = {
     "decode_drop_ratio": decode_drop_ratio,
     "decode_drop_target": decode_drop_target,
     "decode_pass": decode_pass,
+    "baseline_keep_ratio_avg": baseline_keep_ratio_avg,
+    "baseline_lossy_ratio_avg": baseline_lossy_ratio_avg,
+    "baseline_lossless_ratio_avg": baseline_lossless_ratio_avg,
+    "baseline_runtime_total_ratio_avg": baseline_total_ratio_avg,
+    "candidate_keep_ratio_avg": candidate_keep_ratio_avg,
+    "candidate_lossy_ratio_avg": candidate_lossy_ratio_avg,
+    "candidate_lossless_ratio_avg": candidate_lossless_ratio_avg,
+    "candidate_runtime_total_ratio_avg": candidate_total_ratio_avg,
     "require_runtime_decomp": require_runtime_decomp,
     "runtime_decomp_best_us": runtime_decomp_best,
     "runtime_decomp_pass": runtime_decomp_pass,
@@ -308,6 +325,14 @@ lines.append(f"- candidate_decode_tps_avg: {candidate_decode:.4f}")
 lines.append(f"- decode_drop_ratio: {decode_drop_ratio:.6f}")
 lines.append(f"- decode_drop_target: {decode_drop_target:.6f}")
 lines.append(f"- decode_pass: {str(decode_pass).lower()}")
+lines.append(f"- baseline_keep_ratio_avg: {baseline_keep_ratio_avg:.4f}")
+lines.append(f"- baseline_lossy_ratio_avg: {baseline_lossy_ratio_avg:.4f}")
+lines.append(f"- baseline_lossless_ratio_avg: {baseline_lossless_ratio_avg:.4f}")
+lines.append(f"- baseline_runtime_total_ratio_avg: {baseline_total_ratio_avg:.4f}")
+lines.append(f"- candidate_keep_ratio_avg: {candidate_keep_ratio_avg:.4f}")
+lines.append(f"- candidate_lossy_ratio_avg: {candidate_lossy_ratio_avg:.4f}")
+lines.append(f"- candidate_lossless_ratio_avg: {candidate_lossless_ratio_avg:.4f}")
+lines.append(f"- candidate_runtime_total_ratio_avg: {candidate_total_ratio_avg:.4f}")
 lines.append(f"- require_runtime_decomp: {str(require_runtime_decomp).lower()}")
 lines.append(f"- runtime_decomp_best_us: {runtime_decomp_best:.4f}")
 lines.append(f"- runtime_decomp_pass: {str(runtime_decomp_pass).lower()}")

@@ -49,6 +49,12 @@ def safe_div(a: float, b: float) -> float:
     return a / b
 
 
+def avg_or_zero(values):
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
 def coerce_int(v, default=0):
     try:
         return int(v)
@@ -86,6 +92,16 @@ def has_jsonl_summary_metrics(h2o_metrics: dict) -> bool:
         coerce_int(h2o_metrics.get("prompt_tokens", 0)) > 0
         and coerce_float(h2o_metrics.get("prefill_us", 0.0)) > 0.0
     )
+
+
+def collect_h2o_values(rows, key):
+    values = []
+    for row in rows:
+        h2o = row.get("h2o_metrics", {})
+        if not isinstance(h2o, dict):
+            continue
+        values.append(coerce_float(h2o.get(key, 0.0)))
+    return values
 
 
 def resolve_manifest_prompt_path(raw_path: str, prompt_dir: Path) -> Path:
@@ -266,6 +282,12 @@ def main():
         for r in rows
         if isinstance(r.get("h2o_metrics"), dict)
     ]
+    keep_values = collect_h2o_values(rows, "h2o_keep_ratio")
+    lossy_values = collect_h2o_values(rows, "h2o_lossy_ratio")
+    lossless_values = collect_h2o_values(rows, "h2o_lossless_ratio")
+    runtime_total_values = [x * y for x, y in zip(lossy_values, lossless_values)]
+    raw_mb_values = [v / 1024.0 / 1024.0 for v in collect_h2o_values(rows, "h2o_lossless_raw_bytes")]
+    comp_mb_values = [v / 1024.0 / 1024.0 for v in collect_h2o_values(rows, "h2o_lossless_compressed_bytes")]
     cache_hits = [
         float(r.get("h2o_metrics", {}).get("h2o_lossless_decode_cache_hit", 0.0))
         for r in rows
@@ -282,6 +304,12 @@ def main():
         "decode_tps_avg": (sum(decode_tps_values) / len(decode_tps_values)) if decode_tps_values else 0.0,
         "decode_tps_min": min(decode_tps_values) if decode_tps_values else 0.0,
         "decode_tps_max": max(decode_tps_values) if decode_tps_values else 0.0,
+        "h2o_keep_ratio_avg": avg_or_zero(keep_values),
+        "h2o_lossy_ratio_avg": avg_or_zero(lossy_values),
+        "h2o_lossless_ratio_avg": avg_or_zero(lossless_values),
+        "h2o_runtime_total_ratio_avg": avg_or_zero(runtime_total_values),
+        "h2o_lossless_raw_mb_avg": avg_or_zero(raw_mb_values),
+        "h2o_lossless_comp_mb_avg": avg_or_zero(comp_mb_values),
         "runtime_decomp_us_max": max(decomp_values) if decomp_values else 0.0,
         "decode_cache_hit_max": max(cache_hits) if cache_hits else 0.0,
         "overall_pass": len(rows) > 0 and all(int(r.get("effective_returncode", 1)) == 0 for r in rows),
@@ -301,6 +329,12 @@ def main():
     lines.append(f"- decode_tps_avg: {summary['decode_tps_avg']:.4f}")
     lines.append(f"- decode_tps_min: {summary['decode_tps_min']:.4f}")
     lines.append(f"- decode_tps_max: {summary['decode_tps_max']:.4f}")
+    lines.append(f"- h2o_keep_ratio_avg: {summary['h2o_keep_ratio_avg']:.4f}")
+    lines.append(f"- h2o_lossy_ratio_avg: {summary['h2o_lossy_ratio_avg']:.4f}")
+    lines.append(f"- h2o_lossless_ratio_avg: {summary['h2o_lossless_ratio_avg']:.4f}")
+    lines.append(f"- h2o_runtime_total_ratio_avg: {summary['h2o_runtime_total_ratio_avg']:.4f}")
+    lines.append(f"- h2o_lossless_raw_mb_avg: {summary['h2o_lossless_raw_mb_avg']:.4f}")
+    lines.append(f"- h2o_lossless_comp_mb_avg: {summary['h2o_lossless_comp_mb_avg']:.4f}")
     lines.append(f"- runtime_decomp_us_max: {summary['runtime_decomp_us_max']:.4f}")
     lines.append(f"- decode_cache_hit_max: {summary['decode_cache_hit_max']:.4f}")
     lines.append("")
@@ -311,6 +345,9 @@ def main():
         lines.append(
             f"- {Path(r['prompt_file']).name}: rc={r['returncode']}, effective_rc={r['effective_returncode']}, "
             f"decode_tps={float(r.get('decode_tps', 0.0)):.4f}, "
+            f"keep={float(h2o.get('h2o_keep_ratio', 0.0)):.4f}, "
+            f"lossy={float(h2o.get('h2o_lossy_ratio', 0.0)):.4f}, "
+            f"lossless={float(h2o.get('h2o_lossless_ratio', 0.0)):.4f}, "
             f"decomp_us={float(h2o.get('h2o_lossless_decompress_us', 0.0)):.4f}, "
             f"cache_hit={float(h2o.get('h2o_lossless_decode_cache_hit', 0.0)):.4f}"
         )
