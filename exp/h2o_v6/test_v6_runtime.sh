@@ -64,6 +64,12 @@ KV_LOSSLESS_CODEC_RUNTIME="${KV_LOSSLESS_CODEC_RUNTIME:-fp16_gear_predictive_v3}
 LOSSY_TARGET="${LOSSY_TARGET:-3.0}"
 LOSSLESS_TARGET="${LOSSLESS_TARGET:-1.3}"
 DECODE_BASELINE="${DECODE_BASELINE:-6.60}"
+DECODE_BASELINE_MODE="${DECODE_BASELINE_MODE:-fixed}" # fixed|rolling|same_batch
+DECODE_BASELINE_HISTORY="${DECODE_BASELINE_HISTORY:-exp/h2o_v6/decode_baseline_history.jsonl}"
+DECODE_BASELINE_ROLLING_WINDOW="${DECODE_BASELINE_ROLLING_WINDOW:-8}"
+DECODE_BASELINE_ROLLING_MIN_SAMPLES="${DECODE_BASELINE_ROLLING_MIN_SAMPLES:-3}"
+DECODE_BASELINE_KEY="${DECODE_BASELINE_KEY:-$(hostname 2>/dev/null)_${BACKEND}_t${THREADS}_p${PROMPTS}_g${GENS}_rep${REPEAT}}"
+UPDATE_DECODE_BASELINE_HISTORY="${UPDATE_DECODE_BASELINE_HISTORY:-1}"
 DECODE_DROP_TARGET="${DECODE_DROP_TARGET:-0.05}"
 MAX_LOSSLESS_QUEUE_PEAK="${MAX_LOSSLESS_QUEUE_PEAK:-8}"
 MAX_LOSSLESS_FALLBACK="${MAX_LOSSLESS_FALLBACK:-0}"
@@ -157,6 +163,12 @@ echo "  MAX_LOSSLESS_FALLBACK=${MAX_LOSSLESS_FALLBACK}"
 echo "  MAX_LOSSLESS_BACKPRESSURE_SKIP=${MAX_LOSSLESS_BACKPRESSURE_SKIP}"
 echo "  MAX_LOSSLESS_DECOMP_US=${MAX_LOSSLESS_DECOMP_US}"
 echo "  MAX_LOSSLESS_ASYNC_WAIT_US=${MAX_LOSSLESS_ASYNC_WAIT_US}"
+echo "  DECODE_BASELINE_MODE=${DECODE_BASELINE_MODE}"
+echo "  DECODE_BASELINE=${DECODE_BASELINE}"
+echo "  DECODE_BASELINE_KEY=${DECODE_BASELINE_KEY}"
+echo "  DECODE_BASELINE_HISTORY=${DECODE_BASELINE_HISTORY}"
+echo "  DECODE_BASELINE_ROLLING_WINDOW=${DECODE_BASELINE_ROLLING_WINDOW}"
+echo "  DECODE_BASELINE_ROLLING_MIN_SAMPLES=${DECODE_BASELINE_ROLLING_MIN_SAMPLES}"
 echo "  REQUIRE_DECODE_CACHE_HIT=${REQUIRE_DECODE_CACHE_HIT}"
 echo "  REQUIRE_ASYNC_QUEUE_ACTIVITY=${REQUIRE_ASYNC_QUEUE_ACTIVITY}"
 echo "  REQUIRE_DECODE_CACHE_ACTIVITY=${REQUIRE_DECODE_CACHE_ACTIVITY}"
@@ -377,6 +389,41 @@ BENCH_ARGS=(
 if [[ "${KV_LOSSLESS_STORE_DISABLE_FRONT}" -ne 0 ]]; then
   BENCH_ARGS+=(--kv-lossless-store-disable-front)
 fi
+
+extract_decode_best_from_csv() {
+  local csv_path="$1"
+  python3 - "${csv_path}" <<'PY'
+import csv
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(1)
+
+def parse_decode(cell):
+    if not cell:
+        return 0.0
+    m = re.search(r"<br>\s*([0-9]+(?:\.[0-9]+)?)", str(cell))
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(1))
+    except Exception:
+        return 0.0
+
+rows = list(csv.DictReader(path.open("r", encoding="utf-8")))
+best = 0.0
+for row in rows:
+    best = max(best, parse_decode(row.get("speed(tok/s)", "")))
+print(f"{best:.6f}")
+PY
+}
+
+ANALYZE_DECODE_BASELINE="${DECODE_BASELINE}"
+ANALYZE_DECODE_BASELINE_SOURCE="fixed"
+ANALYZE_DECODE_BASELINE_SAMPLES=1
 
 # ── Step 1: Dry-run config generation ─────────────────────────────────────
 echo ""
@@ -755,6 +802,96 @@ else
   exit 1
 fi
 
+# ── Step 6.8: Resolve decode baseline mode ─────────────────────────────────
+echo ""
+echo "==== Step 6.8: Resolve decode baseline (${DECODE_BASELINE_MODE}) ===="
+case "${DECODE_BASELINE_MODE}" in
+  fixed)
+    ANALYZE_DECODE_BASELINE="${DECODE_BASELINE}"
+    ANALYZE_DECODE_BASELINE_SOURCE="fixed"
+    ANALYZE_DECODE_BASELINE_SAMPLES=1
+    ;;
+  rolling)
+    ROLLING_INFO=$(python3 - \
+      "${DECODE_BASELINE_HISTORY}" \
+      "${DECODE_BASELINE_KEY}" \
+      "${DECODE_BASELINE_ROLLING_WINDOW}" \
+      "${DECODE_BASELINE_ROLLING_MIN_SAMPLES}" \
+      "${DECODE_BASELINE}" <<'PY'
+import json
+import statistics
+import sys
+from pathlib import Path
+
+history_path = Path(sys.argv[1])
+key = sys.argv[2]
+window = max(1, int(float(sys.argv[3])))
+min_samples = max(1, int(float(sys.argv[4])))
+fixed = float(sys.argv[5])
+
+values = []
+if history_path.exists():
+    for raw in history_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if str(obj.get("key", "")) != key:
+            continue
+        try:
+            v = float(obj.get("decode_best", 0.0))
+        except Exception:
+            v = 0.0
+        if v > 0.0:
+            values.append(v)
+
+values = values[-window:]
+if len(values) >= min_samples:
+    baseline = statistics.median(values)
+    print(f"{baseline:.6f}\t{len(values)}\trolling_median")
+else:
+    print(f"{fixed:.6f}\t{len(values)}\tfixed_fallback")
+PY
+)
+    read -r ANALYZE_DECODE_BASELINE ANALYZE_DECODE_BASELINE_SAMPLES ANALYZE_DECODE_BASELINE_SOURCE <<<"${ROLLING_INFO}"
+    ;;
+  same_batch)
+    BASELINE_BATCH_OUT="${OUT}/baseline_batch"
+    BASELINE_BATCH_LOG="${OUT}/baseline_batch_stdout.log"
+    rm -rf "${BASELINE_BATCH_OUT}" "${BASELINE_BATCH_LOG}"
+    BASELINE_BENCH_ARGS=("${BENCH_ARGS[@]}")
+    BASELINE_BENCH_ARGS+=(--disable-h2o --disable-lossless --out-dir "${BASELINE_BATCH_OUT}")
+    python3 exp/h2o_v6/run_h2o_v6_bench.py "${BASELINE_BENCH_ARGS[@]}" 2>&1 | tee "${BASELINE_BATCH_LOG}"
+    python3 exp/h2o_v6/parse_h2o_v6_log.py \
+      --log-dir "${BASELINE_BATCH_OUT}/logs" \
+      --out-csv "${BASELINE_BATCH_OUT}/h2o_metrics.csv"
+    SAME_BATCH_DECODE=$(extract_decode_best_from_csv "${BASELINE_BATCH_OUT}/h2o_metrics.csv" || echo "0")
+    if python3 - "${SAME_BATCH_DECODE}" <<'PY'
+import sys
+v = float(sys.argv[1])
+raise SystemExit(0 if v > 0.0 else 1)
+PY
+    then
+      ANALYZE_DECODE_BASELINE="${SAME_BATCH_DECODE}"
+      ANALYZE_DECODE_BASELINE_SOURCE="same_batch"
+      ANALYZE_DECODE_BASELINE_SAMPLES=1
+    else
+      echo "WARN: same_batch baseline decode is invalid (${SAME_BATCH_DECODE}); fallback to fixed ${DECODE_BASELINE}"
+      ANALYZE_DECODE_BASELINE="${DECODE_BASELINE}"
+      ANALYZE_DECODE_BASELINE_SOURCE="same_batch_fallback_fixed"
+      ANALYZE_DECODE_BASELINE_SAMPLES=0
+    fi
+    ;;
+  *)
+    echo "FAIL: invalid DECODE_BASELINE_MODE=${DECODE_BASELINE_MODE} (expected fixed|rolling|same_batch)"
+    exit 1
+    ;;
+esac
+echo "Resolved decode baseline: ${ANALYZE_DECODE_BASELINE} (source=${ANALYZE_DECODE_BASELINE_SOURCE}, samples=${ANALYZE_DECODE_BASELINE_SAMPLES})"
+
 # ── Step 7: Quality gate ─────────────────────────────────────────────────
 echo ""
 echo "==== Step 7: Quality gate ===="
@@ -768,7 +905,9 @@ ANALYZE_ARGS=(
   --max-lossless-backpressure-skip "${MAX_LOSSLESS_BACKPRESSURE_SKIP}"
   --max-lossless-decomp-us "${MAX_LOSSLESS_DECOMP_US}"
   --max-lossless-async-wait-us "${MAX_LOSSLESS_ASYNC_WAIT_US}"
-  --decode-baseline "${DECODE_BASELINE}"
+  --decode-baseline "${ANALYZE_DECODE_BASELINE}"
+  --decode-baseline-source "${ANALYZE_DECODE_BASELINE_SOURCE}"
+  --decode-baseline-samples "${ANALYZE_DECODE_BASELINE_SAMPLES}"
   --decode-drop-target "${DECODE_DROP_TARGET}"
   --out "${OUT}/summary.md"
 )
@@ -791,6 +930,55 @@ if [[ "${REQUIRE_DECODE_CACHE_ACTIVITY}" -ne 0 ]]; then
   ANALYZE_ARGS+=(--require-decode-cache-activity)
 fi
 python3 exp/h2o_v6/analyze_h2o_v6.py "${ANALYZE_ARGS[@]}"
+
+if [[ "${UPDATE_DECODE_BASELINE_HISTORY}" -ne 0 ]]; then
+  mkdir -p "$(dirname "${DECODE_BASELINE_HISTORY}")"
+  python3 - "${OUT}/summary.md" "${DECODE_BASELINE_HISTORY}" "${DECODE_BASELINE_KEY}" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+history_path = Path(sys.argv[2])
+key = sys.argv[3]
+
+if not summary_path.exists():
+    raise SystemExit(0)
+
+gate = {}
+in_gate = False
+for raw in summary_path.read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if line == "## Quality Gate":
+        in_gate = True
+        continue
+    if in_gate and line.startswith("## "):
+        break
+    if in_gate and line.startswith("- ") and ":" in line:
+        k, v = line[2:].split(":", 1)
+        gate[k.strip()] = v.strip().strip("`")
+
+def parse_float(text):
+    m = re.search(r"[-+]?[0-9]*\.?[0-9]+", str(text))
+    return float(m.group(0)) if m else 0.0
+
+decode_best = parse_float(gate.get("decode_best", 0.0))
+if decode_best <= 0.0:
+    raise SystemExit(0)
+
+row = {
+    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "key": key,
+    "decode_best": decode_best,
+    "overall_pass": str(gate.get("overall_pass", "")).lower() == "true",
+    "summary": str(summary_path),
+}
+with history_path.open("a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=True) + "\n")
+PY
+fi
 
 echo "Quality Gate Snapshot:"
 awk '

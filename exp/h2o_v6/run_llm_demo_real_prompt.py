@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import collections
 import fnmatch
 import json
 import os
@@ -12,6 +13,7 @@ PROMPT_TOKENS_RE = re.compile(r"prompt tokens num = (\d+)")
 DECODE_TOKENS_RE = re.compile(r"decode tokens num = (\d+)")
 PREFILL_TIME_RE = re.compile(r"prefill time = ([\d\.]+) s")
 DECODE_TIME_RE = re.compile(r"decode time = ([\d\.]+) s")
+PROMPT_BUCKET_RE = re.compile(r"prompt_(\d+)_\d+\.txt$", re.IGNORECASE)
 
 
 def parse_cli_metrics(output: str):
@@ -157,6 +159,132 @@ def load_prompt_files_from_manifest(manifest_path: Path, prompt_dir: Path):
     return files
 
 
+def parse_bucket_list(text: str):
+    if not text:
+        return []
+    buckets = []
+    seen = set()
+    for raw in str(text).split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if item not in seen:
+            seen.add(item)
+            buckets.append(item)
+    return buckets
+
+
+def infer_prompt_bucket(prompt_file: Path):
+    m = PROMPT_BUCKET_RE.search(prompt_file.name)
+    if m:
+        return m.group(1)
+    return "other"
+
+
+def bucket_sort_key(bucket: str):
+    try:
+        return (0, int(bucket))
+    except Exception:
+        return (1, bucket)
+
+
+def build_bucket_map(files):
+    bucket_map = collections.defaultdict(list)
+    for path in files:
+        bucket_map[infer_prompt_bucket(path)].append(path)
+    return bucket_map
+
+
+def build_bucket_order(bucket_map, requested_buckets):
+    order = []
+    for bucket in requested_buckets:
+        if bucket in bucket_map and bucket not in order:
+            order.append(bucket)
+    remaining = [b for b in bucket_map.keys() if b not in order]
+    remaining = sorted(remaining, key=bucket_sort_key)
+    order.extend(remaining)
+    return order
+
+
+def select_prompt_files(bucket_map, bucket_order, sample_mode, max_prompts, max_prompts_per_bucket):
+    capped = {}
+    for bucket in bucket_order:
+        files = list(bucket_map.get(bucket, []))
+        if max_prompts_per_bucket > 0:
+            files = files[:max_prompts_per_bucket]
+        capped[bucket] = files
+
+    selected = []
+    if sample_mode == "sequential":
+        for bucket in bucket_order:
+            selected.extend(capped[bucket])
+            if max_prompts > 0 and len(selected) >= max_prompts:
+                return selected[:max_prompts]
+        return selected
+
+    # default: stratified round-robin to avoid one bucket dominating the run.
+    cursor = {bucket: 0 for bucket in bucket_order}
+    while True:
+        progressed = False
+        for bucket in bucket_order:
+            idx = cursor[bucket]
+            files = capped[bucket]
+            if idx >= len(files):
+                continue
+            selected.append(files[idx])
+            cursor[bucket] = idx + 1
+            progressed = True
+            if max_prompts > 0 and len(selected) >= max_prompts:
+                return selected
+        if not progressed:
+            break
+    return selected
+
+
+def summarize_rows(rows):
+    decode_tps_values = [float(r.get("decode_tps", 0.0)) for r in rows if float(r.get("decode_tps", 0.0)) > 0.0]
+    keep_values = []
+    lossy_values = []
+    lossless_values = []
+    runtime_total_values = []
+    raw_mb_values = []
+    comp_mb_values = []
+    decomp_values = []
+    cache_hits = []
+    for row in rows:
+        h2o = row.get("h2o_metrics", {})
+        if not isinstance(h2o, dict):
+            continue
+        keep = coerce_float(h2o.get("h2o_keep_ratio", 0.0))
+        lossy = coerce_float(h2o.get("h2o_lossy_ratio", 0.0))
+        lossless = coerce_float(h2o.get("h2o_lossless_ratio", 0.0))
+        keep_values.append(keep)
+        lossy_values.append(lossy)
+        lossless_values.append(lossless)
+        runtime_total_values.append(lossy * lossless)
+        raw_mb_values.append(coerce_float(h2o.get("h2o_lossless_raw_bytes", 0.0)) / 1024.0 / 1024.0)
+        comp_mb_values.append(coerce_float(h2o.get("h2o_lossless_compressed_bytes", 0.0)) / 1024.0 / 1024.0)
+        decomp_values.append(coerce_float(h2o.get("h2o_lossless_decompress_us", 0.0)))
+        cache_hits.append(coerce_float(h2o.get("h2o_lossless_decode_cache_hit", 0.0)))
+
+    return {
+        "total_runs": len(rows),
+        "pass_runs": sum(1 for r in rows if int(r.get("effective_returncode", 1)) == 0),
+        "decode_tps_avg": avg_or_zero(decode_tps_values),
+        "decode_tps_min": min(decode_tps_values) if decode_tps_values else 0.0,
+        "decode_tps_max": max(decode_tps_values) if decode_tps_values else 0.0,
+        "h2o_keep_ratio_avg": avg_or_zero(keep_values),
+        "h2o_lossy_ratio_avg": avg_or_zero(lossy_values),
+        "h2o_lossless_ratio_avg": avg_or_zero(lossless_values),
+        "h2o_runtime_total_ratio_avg": avg_or_zero(runtime_total_values),
+        "h2o_lossless_raw_mb_avg": avg_or_zero(raw_mb_values),
+        "h2o_lossless_comp_mb_avg": avg_or_zero(comp_mb_values),
+        "runtime_decomp_us_max": max(decomp_values) if decomp_values else 0.0,
+        "decode_cache_hit_max": max(cache_hits) if cache_hits else 0.0,
+        "overall_pass": len(rows) > 0 and all(int(r.get("effective_returncode", 1)) == 0 for r in rows),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run llm_demo with real prompt files and collect structured metrics.")
     parser.add_argument("--llm-demo", default="./build/llm_demo")
@@ -165,6 +293,9 @@ def main():
     parser.add_argument("--prompt-pattern", default="prompt_*.txt")
     parser.add_argument("--prompt-manifest", default="", help="Optional manifest (.jsonl/.txt) listing prompt files.")
     parser.add_argument("--max-prompts", type=int, default=0, help="Optional cap on number of prompts to run.")
+    parser.add_argument("--max-prompts-per-bucket", type=int, default=0, help="Optional per-bucket cap.")
+    parser.add_argument("--bucket-list", default="", help="Optional preferred bucket order, e.g. 128,512,2048.")
+    parser.add_argument("--sample-mode", choices=["stratified", "sequential"], default="stratified")
     parser.add_argument("--decode-tokens", type=int, default=128)
     parser.add_argument("--out-dir", default="exp/h2o_v6/out_llm_demo")
     parser.add_argument("--run-tag", default="candidate")
@@ -178,8 +309,16 @@ def main():
         files = sorted(files)
     else:
         files = sorted(prompt_dir.glob(args.prompt_pattern))
-    if args.max_prompts > 0:
-        files = files[: args.max_prompts]
+
+    bucket_map = build_bucket_map(files)
+    bucket_order = build_bucket_order(bucket_map, parse_bucket_list(args.bucket_list))
+    files = select_prompt_files(
+        bucket_map=bucket_map,
+        bucket_order=bucket_order,
+        sample_mode=args.sample_mode,
+        max_prompts=int(args.max_prompts),
+        max_prompts_per_bucket=int(args.max_prompts_per_bucket),
+    )
     if not files:
         raise SystemExit(
             f"No prompt files found under {prompt_dir} with pattern {args.prompt_pattern}"
@@ -255,6 +394,7 @@ def main():
             "run_index": idx,
             "run_tag": args.run_tag,
             "prompt_file": str(prompt_file),
+            "prompt_bucket": infer_prompt_bucket(prompt_file),
             "returncode": proc.returncode,
             "effective_returncode": effective_rc,
             "prompt_tokens": prompt_tokens,
@@ -276,43 +416,41 @@ def main():
         with runs_jsonl.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=True) + "\n")
 
-    decode_tps_values = [float(r.get("decode_tps", 0.0)) for r in rows if r.get("decode_tps", 0.0) > 0.0]
-    decomp_values = [
-        float(r.get("h2o_metrics", {}).get("h2o_lossless_decompress_us", 0.0))
-        for r in rows
-        if isinstance(r.get("h2o_metrics"), dict)
-    ]
-    keep_values = collect_h2o_values(rows, "h2o_keep_ratio")
-    lossy_values = collect_h2o_values(rows, "h2o_lossy_ratio")
-    lossless_values = collect_h2o_values(rows, "h2o_lossless_ratio")
-    runtime_total_values = [x * y for x, y in zip(lossy_values, lossless_values)]
-    raw_mb_values = [v / 1024.0 / 1024.0 for v in collect_h2o_values(rows, "h2o_lossless_raw_bytes")]
-    comp_mb_values = [v / 1024.0 / 1024.0 for v in collect_h2o_values(rows, "h2o_lossless_compressed_bytes")]
-    cache_hits = [
-        float(r.get("h2o_metrics", {}).get("h2o_lossless_decode_cache_hit", 0.0))
-        for r in rows
-        if isinstance(r.get("h2o_metrics"), dict)
-    ]
+    bucket_stats = {}
+    ordered_buckets = []
+    for bucket in build_bucket_order(build_bucket_map(files), parse_bucket_list(args.bucket_list)):
+        subset = [r for r in rows if r.get("prompt_bucket") == bucket]
+        if not subset:
+            continue
+        bucket_stats[bucket] = summarize_rows(subset)
+        ordered_buckets.append(bucket)
+
+    summary_metrics = summarize_rows(rows)
 
     summary = {
         "run_tag": args.run_tag,
         "prompt_pattern": args.prompt_pattern,
         "prompt_manifest": args.prompt_manifest,
         "max_prompts": int(args.max_prompts),
-        "total_runs": len(rows),
-        "pass_runs": sum(1 for r in rows if int(r.get("effective_returncode", 1)) == 0),
-        "decode_tps_avg": (sum(decode_tps_values) / len(decode_tps_values)) if decode_tps_values else 0.0,
-        "decode_tps_min": min(decode_tps_values) if decode_tps_values else 0.0,
-        "decode_tps_max": max(decode_tps_values) if decode_tps_values else 0.0,
-        "h2o_keep_ratio_avg": avg_or_zero(keep_values),
-        "h2o_lossy_ratio_avg": avg_or_zero(lossy_values),
-        "h2o_lossless_ratio_avg": avg_or_zero(lossless_values),
-        "h2o_runtime_total_ratio_avg": avg_or_zero(runtime_total_values),
-        "h2o_lossless_raw_mb_avg": avg_or_zero(raw_mb_values),
-        "h2o_lossless_comp_mb_avg": avg_or_zero(comp_mb_values),
-        "runtime_decomp_us_max": max(decomp_values) if decomp_values else 0.0,
-        "decode_cache_hit_max": max(cache_hits) if cache_hits else 0.0,
-        "overall_pass": len(rows) > 0 and all(int(r.get("effective_returncode", 1)) == 0 for r in rows),
+        "max_prompts_per_bucket": int(args.max_prompts_per_bucket),
+        "sample_mode": args.sample_mode,
+        "bucket_list": parse_bucket_list(args.bucket_list),
+        "bucket_order": ordered_buckets,
+        "total_runs": summary_metrics["total_runs"],
+        "pass_runs": summary_metrics["pass_runs"],
+        "decode_tps_avg": summary_metrics["decode_tps_avg"],
+        "decode_tps_min": summary_metrics["decode_tps_min"],
+        "decode_tps_max": summary_metrics["decode_tps_max"],
+        "h2o_keep_ratio_avg": summary_metrics["h2o_keep_ratio_avg"],
+        "h2o_lossy_ratio_avg": summary_metrics["h2o_lossy_ratio_avg"],
+        "h2o_lossless_ratio_avg": summary_metrics["h2o_lossless_ratio_avg"],
+        "h2o_runtime_total_ratio_avg": summary_metrics["h2o_runtime_total_ratio_avg"],
+        "h2o_lossless_raw_mb_avg": summary_metrics["h2o_lossless_raw_mb_avg"],
+        "h2o_lossless_comp_mb_avg": summary_metrics["h2o_lossless_comp_mb_avg"],
+        "runtime_decomp_us_max": summary_metrics["runtime_decomp_us_max"],
+        "decode_cache_hit_max": summary_metrics["decode_cache_hit_max"],
+        "overall_pass": summary_metrics["overall_pass"],
+        "bucket_stats": bucket_stats,
         "runs_jsonl": str(runs_jsonl),
     }
     summary_json.write_text(json.dumps(summary, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -326,6 +464,9 @@ def main():
     lines.append(f"- prompt_pattern: {summary['prompt_pattern']}")
     lines.append(f"- prompt_manifest: {summary['prompt_manifest']}")
     lines.append(f"- max_prompts: {summary['max_prompts']}")
+    lines.append(f"- max_prompts_per_bucket: {summary['max_prompts_per_bucket']}")
+    lines.append(f"- sample_mode: {summary['sample_mode']}")
+    lines.append(f"- bucket_order: {summary['bucket_order']}")
     lines.append(f"- decode_tps_avg: {summary['decode_tps_avg']:.4f}")
     lines.append(f"- decode_tps_min: {summary['decode_tps_min']:.4f}")
     lines.append(f"- decode_tps_max: {summary['decode_tps_max']:.4f}")
@@ -338,12 +479,35 @@ def main():
     lines.append(f"- runtime_decomp_us_max: {summary['runtime_decomp_us_max']:.4f}")
     lines.append(f"- decode_cache_hit_max: {summary['decode_cache_hit_max']:.4f}")
     lines.append("")
+    lines.append("## Bucket Stats")
+    lines.append("")
+    for bucket in summary["bucket_order"]:
+        stats = summary["bucket_stats"].get(bucket)
+        if not stats:
+            continue
+        lines.append(f"### bucket_{bucket}")
+        lines.append("")
+        lines.append(f"- total_runs: {int(stats.get('total_runs', 0))}")
+        lines.append(f"- pass_runs: {int(stats.get('pass_runs', 0))}")
+        lines.append(f"- overall_pass: {str(bool(stats.get('overall_pass', False))).lower()}")
+        lines.append(f"- decode_tps_avg: {float(stats.get('decode_tps_avg', 0.0)):.4f}")
+        lines.append(f"- decode_tps_min: {float(stats.get('decode_tps_min', 0.0)):.4f}")
+        lines.append(f"- decode_tps_max: {float(stats.get('decode_tps_max', 0.0)):.4f}")
+        lines.append(f"- h2o_keep_ratio_avg: {float(stats.get('h2o_keep_ratio_avg', 0.0)):.4f}")
+        lines.append(f"- h2o_lossy_ratio_avg: {float(stats.get('h2o_lossy_ratio_avg', 0.0)):.4f}")
+        lines.append(f"- h2o_lossless_ratio_avg: {float(stats.get('h2o_lossless_ratio_avg', 0.0)):.4f}")
+        lines.append(f"- h2o_runtime_total_ratio_avg: {float(stats.get('h2o_runtime_total_ratio_avg', 0.0)):.4f}")
+        lines.append(f"- runtime_decomp_us_max: {float(stats.get('runtime_decomp_us_max', 0.0)):.4f}")
+        lines.append(f"- decode_cache_hit_max: {float(stats.get('decode_cache_hit_max', 0.0)):.4f}")
+        lines.append("")
+    lines.append("")
     lines.append("## Runs")
     lines.append("")
     for r in rows:
         h2o = r.get("h2o_metrics", {}) if isinstance(r.get("h2o_metrics"), dict) else {}
         lines.append(
-            f"- {Path(r['prompt_file']).name}: rc={r['returncode']}, effective_rc={r['effective_returncode']}, "
+            f"- {Path(r['prompt_file']).name} [bucket={r.get('prompt_bucket', 'other')}]: "
+            f"rc={r['returncode']}, effective_rc={r['effective_returncode']}, "
             f"decode_tps={float(r.get('decode_tps', 0.0)):.4f}, "
             f"keep={float(h2o.get('h2o_keep_ratio', 0.0)):.4f}, "
             f"lossy={float(h2o.get('h2o_lossy_ratio', 0.0)):.4f}, "

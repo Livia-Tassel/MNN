@@ -14,7 +14,9 @@
 #include <memory>
 #include <vector>
 #include <deque>
-#include <future>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <functional>
 #include <cstdint>
 #include "core/Execution.hpp"
@@ -40,6 +42,7 @@ private:
                 uint64_t rawBytes = 0;
                 uint64_t compressedBytes = 0;
                 uint64_t rawHash = 0;
+                uint64_t blobHash = 0;
                 bool decodedOnce = false;
                 bool rawDropped = false;
                 std::vector<uint8_t> keyBlob;
@@ -49,6 +52,9 @@ private:
                 int startToken = 0;
                 int tokenCount = 0;
                 uint64_t rawHash = 0;
+                uint64_t blobHash = 0;
+                uint64_t rawBytes = 0;
+                uint64_t compressedBytes = 0;
                 std::vector<uint8_t> keyDecoded;
                 std::vector<uint8_t> valueDecoded;
             };
@@ -67,6 +73,7 @@ private:
             std::deque<DecodedCacheEntry> decodeCacheEntries;
         };
         struct AsyncResult {
+            uint64_t taskId = 0;
             int layerIndex = 0;
             int startToken = 0;
             int tokenCount = 0;
@@ -78,6 +85,7 @@ private:
             uint64_t decompressedBytes = 0;
             uint64_t attemptedCompressedBytes = 0;
             uint64_t rawHash = 0;
+            uint64_t blobHash = 0;
             float attemptedRatio = 1.0f;
             float ratio = 1.0f;
             int64_t compressUs = 0;
@@ -85,11 +93,23 @@ private:
             std::vector<uint8_t> keyBlob;
             std::vector<uint8_t> valueBlob;
         };
+        struct AsyncTask {
+            uint64_t taskId = 0;
+            std::function<AsyncResult()> fn;
+        };
         std::vector<LayerState> layerStates;
         std::vector<int> reserveStorage;
-        std::future<AsyncResult> asyncFuture;
-        bool asyncFutureValid = false;
-        int asyncFutureLayerIndex = -1;
+        std::mutex asyncMutex;
+        std::condition_variable asyncCv;
+        std::condition_variable asyncDoneCv;
+        std::deque<AsyncTask> asyncTasks;
+        std::deque<AsyncResult> asyncCompleted;
+        std::vector<std::thread> asyncWorkers;
+        bool asyncStop = false;
+        int asyncConfiguredThreads = 0;
+        int64_t asyncPendingTasks = 0;
+        int64_t asyncRunningTasks = 0;
+        uint64_t asyncTaskSerial = 0;
         int64_t decodeLayerCursor = 0;
         int64_t globalStep = 0;
         int64_t globalTokenStep = 0;

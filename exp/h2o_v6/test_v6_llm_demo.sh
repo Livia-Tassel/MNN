@@ -20,11 +20,15 @@ PROMPT_DIR="${PROMPT_DIR:-/home10T/ljq/MNN/exp/gear_fp16/prompts}"
 PROMPT_PATTERN="${PROMPT_PATTERN:-prompt_*.txt}"
 PROMPT_MANIFEST="${PROMPT_MANIFEST:-}"
 MAX_PROMPTS="${MAX_PROMPTS:-0}"
+MAX_PROMPTS_PER_BUCKET="${MAX_PROMPTS_PER_BUCKET:-0}"
+PROMPT_BUCKET_LIST="${PROMPT_BUCKET_LIST:-128,512,2048}"
+PROMPT_SAMPLE_MODE="${PROMPT_SAMPLE_MODE:-stratified}"
 OUT="${OUT:-exp/h2o_v6/out_llm_demo_v6_$(date +%Y%m%d_%H%M%S)}"
 DECODE_TOKENS="${DECODE_TOKENS:-128}"
 DECODE_DROP_TARGET="${DECODE_DROP_TARGET:-0.08}"
 REQUIRE_RUNTIME_DECOMP="${REQUIRE_RUNTIME_DECOMP:-1}"
 REQUIRE_DECODE_CACHE_HIT="${REQUIRE_DECODE_CACHE_HIT:-0}"
+REQUIRE_BUCKET_DECODE_PASS="${REQUIRE_BUCKET_DECODE_PASS:-1}"
 
 # Candidate knobs (aligned with runtime script defaults)
 H2O_KEEP_RATIO="${H2O_KEEP_RATIO:-0.30}"
@@ -89,6 +93,9 @@ echo " PROMPT_DIR = ${PROMPT_DIR}"
 echo " PROMPT_PATTERN = ${PROMPT_PATTERN}"
 echo " PROMPT_MANIFEST = ${PROMPT_MANIFEST}"
 echo " MAX_PROMPTS = ${MAX_PROMPTS}"
+echo " MAX_PROMPTS_PER_BUCKET = ${MAX_PROMPTS_PER_BUCKET}"
+echo " PROMPT_BUCKET_LIST = ${PROMPT_BUCKET_LIST}"
+echo " PROMPT_SAMPLE_MODE = ${PROMPT_SAMPLE_MODE}"
 echo "============================================================"
 
 python3 - "${MODEL_CONFIG}" "${BASELINE_CFG}" "${CANDIDATE_CFG}" <<'PY'
@@ -213,6 +220,7 @@ RUN_PROMPT_ARGS=(
   --llm-demo "${LLM_DEMO}"
   --prompt-dir "${PROMPT_DIR}"
   --prompt-pattern "${PROMPT_PATTERN}"
+  --sample-mode "${PROMPT_SAMPLE_MODE}"
   --decode-tokens "${DECODE_TOKENS}"
 )
 if [[ -n "${PROMPT_MANIFEST}" ]]; then
@@ -220,6 +228,12 @@ if [[ -n "${PROMPT_MANIFEST}" ]]; then
 fi
 if [[ "${MAX_PROMPTS}" -gt 0 ]]; then
   RUN_PROMPT_ARGS+=(--max-prompts "${MAX_PROMPTS}")
+fi
+if [[ "${MAX_PROMPTS_PER_BUCKET}" -gt 0 ]]; then
+  RUN_PROMPT_ARGS+=(--max-prompts-per-bucket "${MAX_PROMPTS_PER_BUCKET}")
+fi
+if [[ -n "${PROMPT_BUCKET_LIST}" ]]; then
+  RUN_PROMPT_ARGS+=(--bucket-list "${PROMPT_BUCKET_LIST}")
 fi
 
 python3 exp/h2o_v6/run_llm_demo_real_prompt.py \
@@ -240,6 +254,7 @@ python3 - \
   "${DECODE_DROP_TARGET}" \
   "${REQUIRE_RUNTIME_DECOMP}" \
   "${REQUIRE_DECODE_CACHE_HIT}" \
+  "${REQUIRE_BUCKET_DECODE_PASS}" \
   "${REPORT_MD}" \
   "${REPORT_JSON}" <<'PY'
 import json
@@ -251,8 +266,9 @@ candidate_path = Path(sys.argv[2])
 decode_drop_target = float(sys.argv[3])
 require_runtime_decomp = int(sys.argv[4]) != 0
 require_decode_cache_hit = int(sys.argv[5]) != 0
-report_md = Path(sys.argv[6])
-report_json = Path(sys.argv[7])
+require_bucket_decode_pass = int(sys.argv[6]) != 0
+report_md = Path(sys.argv[7])
+report_json = Path(sys.argv[8])
 
 baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
@@ -278,12 +294,56 @@ runtime_decomp_pass = (runtime_decomp_best > 0.0) if require_runtime_decomp else
 decode_cache_hit_best = float(candidate.get("decode_cache_hit_max", 0.0))
 decode_cache_hit_pass = (decode_cache_hit_best > 0.0) if require_decode_cache_hit else True
 
+baseline_bucket_stats = baseline.get("bucket_stats", {})
+candidate_bucket_stats = candidate.get("bucket_stats", {})
+bucket_order = []
+for b in baseline.get("bucket_order", []):
+    if b not in bucket_order:
+        bucket_order.append(b)
+for b in candidate.get("bucket_order", []):
+    if b not in bucket_order:
+        bucket_order.append(b)
+
+bucket_report = {}
+bucket_decode_failures = []
+for bucket in bucket_order:
+    b_stats = baseline_bucket_stats.get(bucket, {})
+    c_stats = candidate_bucket_stats.get(bucket, {})
+    b_decode = float(b_stats.get("decode_tps_avg", 0.0))
+    c_decode = float(c_stats.get("decode_tps_avg", 0.0))
+    b_runs = int(b_stats.get("total_runs", 0))
+    c_runs = int(c_stats.get("total_runs", 0))
+    drop = 0.0
+    decode_gate = True
+    gate_enabled = b_decode > 0.0 and b_runs > 0 and c_runs > 0
+    if gate_enabled:
+        drop = (b_decode - c_decode) / b_decode
+        decode_gate = drop <= decode_drop_target
+        if not decode_gate:
+            bucket_decode_failures.append(bucket)
+    bucket_report[bucket] = {
+        "baseline_runs": b_runs,
+        "candidate_runs": c_runs,
+        "baseline_decode_tps_avg": b_decode,
+        "candidate_decode_tps_avg": c_decode,
+        "decode_drop_ratio": drop,
+        "decode_gate_enabled": gate_enabled,
+        "decode_pass": decode_gate,
+        "baseline_lossy_ratio_avg": float(b_stats.get("h2o_lossy_ratio_avg", 0.0)),
+        "candidate_lossy_ratio_avg": float(c_stats.get("h2o_lossy_ratio_avg", 0.0)),
+        "baseline_runtime_total_ratio_avg": float(b_stats.get("h2o_runtime_total_ratio_avg", 0.0)),
+        "candidate_runtime_total_ratio_avg": float(c_stats.get("h2o_runtime_total_ratio_avg", 0.0)),
+    }
+
+bucket_decode_pass = len(bucket_decode_failures) == 0
+
 overall_pass = (
     bool(baseline.get("overall_pass", False))
     and bool(candidate.get("overall_pass", False))
     and decode_pass
     and runtime_decomp_pass
     and decode_cache_hit_pass
+    and (bucket_decode_pass if require_bucket_decode_pass else True)
 )
 
 report = {
@@ -309,6 +369,10 @@ report = {
     "require_decode_cache_hit": require_decode_cache_hit,
     "decode_cache_hit_best": decode_cache_hit_best,
     "decode_cache_hit_pass": decode_cache_hit_pass,
+    "require_bucket_decode_pass": require_bucket_decode_pass,
+    "bucket_decode_pass": bucket_decode_pass,
+    "bucket_decode_failures": bucket_decode_failures,
+    "bucket_report": bucket_report,
     "baseline_overall_pass": bool(baseline.get("overall_pass", False)),
     "candidate_overall_pass": bool(candidate.get("overall_pass", False)),
 }
@@ -339,8 +403,34 @@ lines.append(f"- runtime_decomp_pass: {str(runtime_decomp_pass).lower()}")
 lines.append(f"- require_decode_cache_hit: {str(require_decode_cache_hit).lower()}")
 lines.append(f"- decode_cache_hit_best: {decode_cache_hit_best:.4f}")
 lines.append(f"- decode_cache_hit_pass: {str(decode_cache_hit_pass).lower()}")
+lines.append(f"- require_bucket_decode_pass: {str(require_bucket_decode_pass).lower()}")
+lines.append(f"- bucket_decode_pass: {str(bucket_decode_pass).lower()}")
+lines.append(f"- bucket_decode_failures: {bucket_decode_failures}")
 lines.append(f"- baseline_summary: `{baseline_path}`")
 lines.append(f"- candidate_summary: `{candidate_path}`")
+lines.append("")
+lines.append("## Bucket Stats")
+lines.append("")
+for bucket in bucket_order:
+    row = bucket_report.get(bucket, {})
+    lines.append(f"### bucket_{bucket}")
+    lines.append("")
+    lines.append(f"- baseline_runs: {int(row.get('baseline_runs', 0))}")
+    lines.append(f"- candidate_runs: {int(row.get('candidate_runs', 0))}")
+    lines.append(f"- baseline_decode_tps_avg: {float(row.get('baseline_decode_tps_avg', 0.0)):.4f}")
+    lines.append(f"- candidate_decode_tps_avg: {float(row.get('candidate_decode_tps_avg', 0.0)):.4f}")
+    lines.append(f"- decode_drop_ratio: {float(row.get('decode_drop_ratio', 0.0)):.6f}")
+    lines.append(f"- decode_gate_enabled: {str(bool(row.get('decode_gate_enabled', False))).lower()}")
+    lines.append(f"- decode_pass: {str(bool(row.get('decode_pass', True))).lower()}")
+    lines.append(f"- baseline_lossy_ratio_avg: {float(row.get('baseline_lossy_ratio_avg', 0.0)):.4f}")
+    lines.append(f"- candidate_lossy_ratio_avg: {float(row.get('candidate_lossy_ratio_avg', 0.0)):.4f}")
+    lines.append(
+        f"- baseline_runtime_total_ratio_avg: {float(row.get('baseline_runtime_total_ratio_avg', 0.0)):.4f}"
+    )
+    lines.append(
+        f"- candidate_runtime_total_ratio_avg: {float(row.get('candidate_runtime_total_ratio_avg', 0.0)):.4f}"
+    )
+    lines.append("")
 report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(f"Wrote {report_md}")
 print(f"Wrote {report_json}")

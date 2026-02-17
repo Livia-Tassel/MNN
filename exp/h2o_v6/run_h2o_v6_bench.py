@@ -97,6 +97,12 @@ def main():
     parser.add_argument("--kv-lossless-max-queue", type=int, default=256)
     parser.add_argument("--kv-lossless-decode-cache-blocks", type=int, default=64)
     parser.add_argument("--kv-lossless-strict-roundtrip-check", action="store_true")
+    parser.add_argument("--disable-h2o", action="store_true", help="Force kv_h2o_enable=false for baseline runs.")
+    parser.add_argument(
+        "--disable-lossless",
+        action="store_true",
+        help="Force kv_lossless_enable=false and kv_lossless_runtime_enable=false.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -158,11 +164,15 @@ def main():
         cfg_path = cfg_dir / f"{run_id}.json"
         log_path = log_dir / f"{run_id}.log"
 
+        h2o_enable = not bool(args.disable_h2o)
+        lossless_enable = bool(args.kv_lossless_enable) and not bool(args.disable_lossless) and h2o_enable
+        lossless_runtime_enable = bool(args.kv_lossless_runtime_enable) and lossless_enable
+
         cfg = dict(base_cfg)
         cfg.update(
             {
                 "base_dir": normalized_base_dir,
-                "kv_h2o_enable": True,
+                "kv_h2o_enable": h2o_enable,
                 "kv_h2o_layer_start": int(args.h2o_layer_start),
                 "kv_h2o_layer_end": int(args.h2o_layer_end),
                 "kv_h2o_block_tokens": int(block),
@@ -174,12 +184,12 @@ def main():
                 "kv_h2o_ema_alpha": float(alpha),
                 "kv_h2o_update_interval": int(update_int),
                 "kv_h2o_trigger_min_tokens": int(trigger_min),
-                "kv_h2o_log_stats": bool(args.h2o_log_stats),
-                "kv_lossless_enable": bool(args.kv_lossless_enable),
-                "kv_lossless_scope": args.kv_lossless_scope,
+                "kv_h2o_log_stats": bool(args.h2o_log_stats) and h2o_enable,
+                "kv_lossless_enable": lossless_enable,
+                "kv_lossless_scope": args.kv_lossless_scope if lossless_enable else "none",
                 "kv_lossless_front_n": int(args.kv_lossless_front_n),
-                "kv_lossless_codec": args.kv_lossless_codec,
-                "kv_lossless_runtime_enable": bool(args.kv_lossless_runtime_enable),
+                "kv_lossless_codec": args.kv_lossless_codec if lossless_enable else "none",
+                "kv_lossless_runtime_enable": lossless_runtime_enable,
                 "kv_lossless_runtime_mode": args.kv_lossless_runtime_mode,
                 "kv_lossless_block_tokens": int(args.kv_lossless_block_tokens),
                 "kv_lossless_hot_recent_tokens": int(args.kv_lossless_hot_recent_tokens),
@@ -253,11 +263,14 @@ def main():
                 "h2o_layer_end": int(args.h2o_layer_end),
                 "h2o_target_mode": args.h2o_target_mode,
                 "h2o_target_lossy_ratio": target_lossy,
-                "kv_lossless_enable": bool(args.kv_lossless_enable),
-                "kv_lossless_scope": args.kv_lossless_scope,
+                "disable_h2o": bool(args.disable_h2o),
+                "disable_lossless": bool(args.disable_lossless),
+                "kv_h2o_enable": h2o_enable,
+                "kv_lossless_enable": lossless_enable,
+                "kv_lossless_scope": args.kv_lossless_scope if lossless_enable else "none",
                 "kv_lossless_front_n": int(args.kv_lossless_front_n),
-                "kv_lossless_codec": args.kv_lossless_codec,
-                "kv_lossless_runtime_enable": bool(args.kv_lossless_runtime_enable),
+                "kv_lossless_codec": args.kv_lossless_codec if lossless_enable else "none",
+                "kv_lossless_runtime_enable": lossless_runtime_enable,
                 "kv_lossless_runtime_mode": args.kv_lossless_runtime_mode,
                 "kv_lossless_block_tokens": int(args.kv_lossless_block_tokens),
                 "kv_lossless_hot_recent_tokens": int(args.kv_lossless_hot_recent_tokens),

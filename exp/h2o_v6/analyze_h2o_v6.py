@@ -65,6 +65,17 @@ def main():
     parser.add_argument("--lossy-target", type=float, default=3.0)
     parser.add_argument("--lossless-target", type=float, default=1.3)
     parser.add_argument("--decode-baseline", type=float, default=0.0, help="Baseline decode TPS for regression gate.")
+    parser.add_argument(
+        "--decode-baseline-source",
+        default="",
+        help="Optional decode baseline source label (e.g. fixed, rolling_median, same_batch).",
+    )
+    parser.add_argument(
+        "--decode-baseline-samples",
+        type=int,
+        default=0,
+        help="Optional sample count used to derive decode baseline.",
+    )
     parser.add_argument("--decode-drop-target", type=float, default=0.05, help="Max allowed decode TPS drop ratio.")
     parser.add_argument(
         "--max-lossless-queue-peak",
@@ -463,6 +474,10 @@ def main():
         f.write(f"- overall_pass: {format_gate_bool(overall_pass)}\n")
         if args.decode_baseline > 0.0:
             f.write(f"- decode_baseline: {args.decode_baseline:.4f}\n")
+            if args.decode_baseline_source:
+                f.write(f"- decode_baseline_source: {args.decode_baseline_source}\n")
+            if args.decode_baseline_samples > 0:
+                f.write(f"- decode_baseline_samples: {int(args.decode_baseline_samples)}\n")
             f.write(f"- decode_best: {best_decode['_decode_tps']:.4f}\n")
             f.write(f"- decode_drop_ratio: {decode_drop_ratio:.6f}\n")
             f.write(f"- decode_drop_target: {args.decode_drop_target:.6f}\n")
