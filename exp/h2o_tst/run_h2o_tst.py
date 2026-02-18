@@ -52,6 +52,34 @@ def parse_quality_gate(summary_md: Path) -> Dict[str, str]:
     return gate
 
 
+def extract_failure_reason(console_log: Path) -> str:
+    if not console_log.exists():
+        return "console log missing"
+    lines = console_log.read_text(encoding="utf-8", errors="ignore").splitlines()
+    tail = lines[-240:] if len(lines) > 240 else lines
+    patterns = (
+        "FAIL:",
+        "error:",
+        "Error:",
+        "Traceback",
+        "No such file",
+        "not executable",
+        "not found",
+        "Segmentation fault",
+        "Aborted",
+    )
+    for line in reversed(tail):
+        s = line.strip()
+        for p in patterns:
+            if p in s:
+                return s
+    for line in reversed(tail):
+        s = line.strip()
+        if s:
+            return s
+    return "unknown failure"
+
+
 def run_logged(cmd: List[str], cwd: Path, env: Dict[str, str], log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("wb") as f:
@@ -79,13 +107,28 @@ def runtime_row(
 
     rc = run_logged(["bash", "exp/h2o_v6/test_v6_runtime.sh"], root, run_env, console_log)
     gate = parse_quality_gate(summary_md)
+    summary_exists = summary_md.exists() and summary_md.stat().st_size > 0
+    gate_found = bool(gate)
     overall_pass = (rc == 0) and gate.get("overall_pass", "").lower() == "true"
+    fail_reason = ""
+    if not overall_pass:
+        if rc != 0:
+            fail_reason = extract_failure_reason(console_log)
+        elif not summary_exists:
+            fail_reason = "summary missing"
+        elif not gate_found:
+            fail_reason = "quality gate section missing"
+        else:
+            fail_reason = f"quality gate failed: status={gate.get('quality_status', 'unknown')}"
 
     row = {
         "suite": "runtime",
         "case": case_name,
         "mode": runtime_mode,
         "return_code": rc,
+        "summary_exists": summary_exists,
+        "quality_gate_found": gate_found,
+        "failure_reason": fail_reason,
         "overall_pass": overall_pass,
         "summary": str(summary_md),
         "console_log": str(console_log),
@@ -131,11 +174,20 @@ def llm_demo_row(root: Path, base_out: Path, shared_env: Dict[str, str]) -> Dict
             obj = {}
 
     overall_pass = (rc == 0) and bool(obj.get("overall_pass", False))
+    fail_reason = ""
+    if not overall_pass:
+        if rc != 0:
+            fail_reason = extract_failure_reason(console_log)
+        elif not report_json.exists():
+            fail_reason = "report json missing"
+        else:
+            fail_reason = "llm_demo gate failed"
 
     row = {
         "suite": "llm_demo",
         "case": case_name,
         "return_code": rc,
+        "failure_reason": fail_reason,
         "overall_pass": overall_pass,
         "summary": str(report_md),
         "report_json": str(report_json),
@@ -191,15 +243,17 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
         lines.append("## Runtime")
         lines.append("")
         for i, r in enumerate(runtime_rows, 1):
+            reason = r.get("failure_reason", "")
+            reason_seg = f", reason={reason}" if reason else ""
             lines.append(
-                f"{i}. case={r['case']}, pass={str(r['overall_pass']).lower()}, "
+                f"{i}. case={r['case']}, pass={str(r['overall_pass']).lower()}, rc={r['return_code']}, "
                 f"decode={r['decode_best']:.4f}/{r['decode_baseline']:.4f}, "
                 f"drop={r['decode_drop_ratio']:.6f}/{r['decode_drop_target']:.6f}, "
                 f"lossy={r['lossy_best']:.4f}, lossless={r['lossless_selected_value']:.4f}, "
                 f"decomp_us={r['runtime_decomp_best_us']:.4f}, async_wait_us={r['runtime_async_wait_best_us']:.4f}, "
                 f"queue={r['runtime_queue_peak_best']:.4f}, fallback={r['runtime_fallback_best']:.4f}, "
                 f"cache_hit={r['runtime_decode_cache_hit_best']:.4f}, cache_miss={r['runtime_decode_cache_miss_best']:.4f}, "
-                f"summary=`{r['summary']}`"
+                f"summary=`{r['summary']}`{reason_seg}"
             )
         lines.append("")
 
@@ -207,13 +261,15 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
         lines.append("## llm_demo")
         lines.append("")
         for i, r in enumerate(llm_rows, 1):
+            reason = r.get("failure_reason", "")
+            reason_seg = f", reason={reason}" if reason else ""
             lines.append(
-                f"{i}. case={r['case']}, pass={str(r['overall_pass']).lower()}, "
+                f"{i}. case={r['case']}, pass={str(r['overall_pass']).lower()}, rc={r['return_code']}, "
                 f"decode={r['baseline_decode_tps_avg']:.4f}->{r['candidate_decode_tps_avg']:.4f}, "
                 f"drop={r['decode_drop_ratio']:.6f}/{r['decode_drop_target']:.6f}, "
                 f"lossy={r['candidate_lossy_ratio_avg']:.4f}, lossless={r['candidate_lossless_ratio_avg']:.4f}, "
                 f"total={r['candidate_runtime_total_ratio_avg']:.4f}, decomp_us={r['runtime_decomp_best_us']:.4f}, "
-                f"summary=`{r['summary']}`"
+                f"summary=`{r['summary']}`{reason_seg}"
             )
         lines.append("")
 
