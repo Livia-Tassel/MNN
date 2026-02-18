@@ -38,10 +38,31 @@ namespace Transformer {
 
 void KVMeta::sync() {
     int revertNumber = 0;
-    for (int i=0; i<n_reserve; ++i) {
-        revertNumber += reserve[2*i+1];
+    if (n_reserve > 0) {
+        if (reserve == nullptr) {
+            MNN_ERROR("KVMeta::sync got n_reserve=%d but reserve is null, drop reserve entries.\n", n_reserve);
+            n_reserve = 0;
+        } else {
+            for (int i = 0; i < n_reserve; ++i) {
+                const int begin = reserve[2 * i];
+                const int len = reserve[2 * i + 1];
+                if (begin < 0 || len <= 0) {
+                    MNN_ERROR("KVMeta::sync got invalid reserve[%d]={begin=%d,len=%d}, drop reserve entries.\n",
+                              i, begin, len);
+                    revertNumber = 0;
+                    n_reserve = 0;
+                    break;
+                }
+                revertNumber += len;
+            }
+        }
     }
-    previous = previous - remove + add + revertNumber;
+    const size_t baseLen = previous + add;
+    if (remove > baseLen) {
+        MNN_ERROR("KVMeta::sync got remove=%zu > previous+add=%zu, clamp remove.\n", remove, baseLen);
+        remove = baseLen;
+    }
+    previous = baseLen - remove + static_cast<size_t>(ALIMAX(0, revertNumber));
     n_reserve = 0;
     reserve = nullptr;
     remove = 0;

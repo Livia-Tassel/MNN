@@ -105,9 +105,15 @@ struct KVMeta {
     int h2o_total_evict_tokens = 0;
 
     int computeReserveSize() const {
+        if (n_reserve <= 0) {
+            return 0;
+        }
+        if (reserve == nullptr) {
+            return -1;
+        }
         int sum = 0;
-        for (int i=0; i<n_reserve; ++i) {
-            int reserveUnit = reserve[2*i+1];
+        for (int i = 0; i < n_reserve; ++i) {
+            int reserveUnit = reserve[2 * i + 1];
             if (reserveUnit <= 0) {
                 // Invalid
                 return -1;

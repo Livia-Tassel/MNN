@@ -451,7 +451,24 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
 }
 
 void CPUKVCacheManager::onRealloc(KVMeta* meta) {
-    auto kv_seq_len = meta->previous + meta->add - meta->remove + meta->computeReverseSize();
+    if (meta == nullptr) {
+        return;
+    }
+    const size_t baseSeqLen = meta->previous + meta->add;
+    if (meta->remove > baseSeqLen) {
+        MNN_ERROR("Invalid KV realloc meta: remove=%zu exceeds previous+add=%zu, clamp.\n",
+                  meta->remove, baseSeqLen);
+        meta->remove = baseSeqLen;
+    }
+    int reserveSize = meta->computeReserveSize();
+    if (reserveSize < 0) {
+        MNN_ERROR("Invalid KV reserve plan: n_reserve=%d reserve_ptr=%p. Disable reserve compaction for this step.\n",
+                  meta->n_reserve, meta->reserve);
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
+        reserveSize = 0;
+    }
+    auto kv_seq_len = baseSeqLen - meta->remove + static_cast<size_t>(reserveSize);
     if (kv_seq_len > mMaxLength) {
         // Realloc
         int oldMaxLength = mMaxLength;
@@ -510,23 +527,48 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         }
     }
     // Remove
-    auto start = mPastLength - meta->remove;
-    if (0 == meta->n_reserve || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
+    int start = mPastLength - static_cast<int>(meta->remove);
+    if (start < 0) {
+        MNN_ERROR("Invalid KV realloc start: past=%d remove=%zu, clamp remove to past length.\n",
+                  mPastLength, meta->remove);
+        start = 0;
+        meta->remove = static_cast<size_t>(mPastLength);
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
+    }
+    if (0 == meta->n_reserve || meta->reserve == nullptr || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
         mPastLength = start;
         return;
     }
 #if 1
     auto dstIndex = start;
+    int64_t lastSrcEnd = start;
     for (int n = 0; n < meta->n_reserve; ++n) {
         auto begin = meta->reserve[2 * n];
         auto size  = meta->reserve[2 * n + 1];
-        auto srcIndex = start + begin;
+        const int64_t srcIndex64 = static_cast<int64_t>(start) + static_cast<int64_t>(begin);
+        const int64_t srcEnd64 = srcIndex64 + static_cast<int64_t>(size);
+        const int64_t removeBound64 = static_cast<int64_t>(meta->remove);
+        if (begin < 0
+            || size <= 0
+            || srcIndex64 < static_cast<int64_t>(start)
+            || srcEnd64 < srcIndex64
+            || srcEnd64 > static_cast<int64_t>(mPastLength)
+            || static_cast<int64_t>(begin) + static_cast<int64_t>(size) > removeBound64
+            || srcIndex64 < lastSrcEnd) {
+            MNN_ERROR("Invalid KV reserve range[%d]: begin=%d size=%d start=%d past=%d remove=%zu. Fallback to tail-trim only.\n",
+                      n, begin, size, start, mPastLength, meta->remove);
+            mPastLength = start;
+            return;
+        }
+        const int srcIndex = static_cast<int>(srcIndex64);
         if (mBytes == 2) {
             moveKV<FLOAT16_T>(srcIndex, dstIndex, size);
         } else {
             moveKV<float>(srcIndex, dstIndex, size);
         }
         dstIndex += size;
+        lastSrcEnd = srcEnd64;
     }
     mPastLength = dstIndex;
 #else
