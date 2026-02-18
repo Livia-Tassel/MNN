@@ -1209,7 +1209,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
         const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
         const int globalDecodeCacheBlocks = (decodeCacheBlocks > 0)
-            ? ALIMAX(4, ALIMIN(16, decodeCacheBlocks))
+            ? ALIMAX(8, ALIMIN(32, decodeCacheBlocks))
             : 0;
         if (decodeCacheBlocks <= 0) {
             restoreState.decodeCacheEntries.clear();
@@ -2623,7 +2623,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         auto decodeOnePendingLosslessBlock = [&](CPUAttention::H2OSharedState::LayerState& layerState) {
             const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
             const int globalDecodeCacheBlocks = (decodeCacheBlocks > 0)
-                ? ALIMAX(4, ALIMIN(16, decodeCacheBlocks))
+                ? ALIMAX(8, ALIMIN(32, decodeCacheBlocks))
                 : 0;
             if (decodeCacheBlocks <= 0) {
                 layerState.decodeCacheEntries.clear();

@@ -329,7 +329,7 @@ def main() -> int:
         "PROMPT_SAMPLE_MODE": env_str("PROMPT_SAMPLE_MODE", "stratified"),
         "MAX_PROMPTS": str(env_int("MAX_PROMPTS", 0)),
         "MAX_PROMPTS_PER_BUCKET": str(env_int("MAX_PROMPTS_PER_BUCKET", 1)),
-        "DECODE_TOKENS": str(env_int("DECODE_TOKENS", 128)),
+        "DECODE_TOKENS": str(env_int("DECODE_TOKENS", 512)),
         "DECODE_DROP_TARGET": f"{env_float('LLM_DEMO_DECODE_DROP_TARGET', 0.08):.6f}",
         "REQUIRE_RUNTIME_DECOMP": str(env_int("LLM_DEMO_REQUIRE_RUNTIME_DECOMP", 1)),
         "REQUIRE_DECODE_CACHE_HIT": str(env_int("LLM_DEMO_REQUIRE_DECODE_CACHE_HIT", 0)),

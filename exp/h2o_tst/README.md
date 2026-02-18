@@ -42,6 +42,7 @@ bash exp/h2o_tst/test_h2o_tst.sh
   - `PROMPT_DIR`（默认 `/home10T/ljq/MNN/exp/gear_fp16/prompts`）
   - `PROMPT_BUCKET_LIST`（默认 `2048`）
   - `MAX_PROMPTS_PER_BUCKET`（默认 `1`）
+  - `DECODE_TOKENS`（默认 `512`）
 - llm_demo 稳定性参数：
   - `LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE`（默认 `full`）
   - `LLM_DEMO_KV_LOSSLESS_MAX_QUEUE`（默认 `64`）
