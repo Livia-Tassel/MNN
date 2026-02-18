@@ -13,7 +13,7 @@ bash exp/h2o_tst/test_h2o_tst.sh
 1. `runtime_full`（`test_v6_runtime.sh`）
 2. `runtime_store`（`test_v6_runtime.sh`，store参数）
 3. `llm_demo`（`test_v6_llm_demo.sh`，默认 128/512 分桶、每桶 1 条 prompt）
-   - `llm_demo` 默认使用更稳的 store 运行时参数（可用环境变量覆盖）
+   - `llm_demo` 默认使用 full 模式（`KV_LOSSLESS_RUNTIME_MODE=full`）
 
 ## 输出目录
 
@@ -43,8 +43,9 @@ bash exp/h2o_tst/test_h2o_tst.sh
   - `PROMPT_BUCKET_LIST`（默认 `128,512`）
   - `MAX_PROMPTS_PER_BUCKET`（默认 `1`）
 - llm_demo 稳定性参数：
-  - `LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE`（默认 `store`）
+  - `LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE`（默认 `full`）
   - `LLM_DEMO_KV_LOSSLESS_MAX_QUEUE`（默认 `64`）
   - `LLM_DEMO_KV_LOSSLESS_STORE_DISABLE_FRONT`（默认 `1`）
   - `LLM_DEMO_KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS`（默认 `16`）
   - `LLM_DEMO_KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS`（默认 `384`）
+  - 上述 `STORE_*` 参数仅在 `LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE=store` 时生效

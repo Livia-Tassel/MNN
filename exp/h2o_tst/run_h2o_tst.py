@@ -319,6 +319,8 @@ def main() -> int:
         "MAX_LOSSLESS_ASYNC_WAIT_US": str(env_int("STORE_MAX_LOSSLESS_ASYNC_WAIT_US", 40000)),
     }
 
+    llm_runtime_mode = env_str("LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE", "full")
+
     llm_env = {
         "PROMPT_DIR": env_str("PROMPT_DIR", "/home10T/ljq/MNN/exp/gear_fp16/prompts"),
         "PROMPT_PATTERN": env_str("PROMPT_PATTERN", "prompt_*.txt"),
@@ -332,15 +334,17 @@ def main() -> int:
         "REQUIRE_RUNTIME_DECOMP": str(env_int("LLM_DEMO_REQUIRE_RUNTIME_DECOMP", 1)),
         "REQUIRE_DECODE_CACHE_HIT": str(env_int("LLM_DEMO_REQUIRE_DECODE_CACHE_HIT", 0)),
         "REQUIRE_BUCKET_DECODE_PASS": str(env_int("LLM_DEMO_REQUIRE_BUCKET_DECODE_PASS", 1)),
-        # More stable defaults for long real prompts (e.g. 2048 bucket).
-        "KV_LOSSLESS_RUNTIME_MODE": env_str("LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE", "store"),
-        "KV_LOSSLESS_STORE_DISABLE_FRONT": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_DISABLE_FRONT", 1)),
-        "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 16)),
-        "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 384)),
-        "KV_LOSSLESS_MAX_QUEUE": str(env_int("LLM_DEMO_KV_LOSSLESS_MAX_QUEUE", 64)),
+        "KV_LOSSLESS_RUNTIME_MODE": llm_runtime_mode,
         "KV_LOSSLESS_ASYNC_THREADS": str(env_int("KV_LOSSLESS_ASYNC_THREADS", 2)),
         "KV_LOSSLESS_DECODE_CACHE_BLOCKS": str(env_int("KV_LOSSLESS_DECODE_CACHE_BLOCKS", 64)),
     }
+    if llm_runtime_mode == "store":
+        llm_env.update({
+            "KV_LOSSLESS_STORE_DISABLE_FRONT": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_DISABLE_FRONT", 1)),
+            "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 16)),
+            "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 384)),
+            "KV_LOSSLESS_MAX_QUEUE": str(env_int("LLM_DEMO_KV_LOSSLESS_MAX_QUEUE", 64)),
+        })
 
     print("============================================================")
     print("H2O tst minimal suite")
