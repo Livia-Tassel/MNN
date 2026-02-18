@@ -2566,6 +2566,54 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                     if (runtimeStoreModeLocal && !targetLayerState.losslessBlocks.empty()) {
                         auto& stored = targetLayerState.losslessBlocks.back();
+                        if (decodeCacheBlocks > 0) {
+                            std::vector<uint8_t> seededKey;
+                            std::vector<uint8_t> seededValue;
+                            const bool seededOk = collectKvMergedRange(
+                                mKVCacheManager.get(),
+                                mKvNumHead,
+                                mHeadDim,
+                                mBytes,
+                                lP,
+                                hP,
+                                ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
+                                stored.startToken,
+                                stored.tokenCount,
+                                seededKey,
+                                seededValue);
+                            if (seededOk) {
+                                const uint64_t seededBytes = (uint64_t)seededKey.size() + (uint64_t)seededValue.size();
+                                if (seededBytes == stored.rawBytes) {
+                                    for (auto it = targetLayerState.decodeCacheEntries.begin();
+                                         it != targetLayerState.decodeCacheEntries.end();) {
+                                        const bool posMatch = it->startToken == stored.startToken
+                                            && it->tokenCount == stored.tokenCount;
+                                        const bool bytesMatch = it->rawBytes == stored.rawBytes
+                                            && it->compressedBytes == stored.compressedBytes;
+                                        const bool hashMatch = (stored.rawHash != 0 && it->rawHash == stored.rawHash)
+                                            || (stored.blobHash != 0 && it->blobHash == stored.blobHash);
+                                        if ((posMatch && bytesMatch) || (bytesMatch && hashMatch)) {
+                                            it = targetLayerState.decodeCacheEntries.erase(it);
+                                        } else {
+                                            ++it;
+                                        }
+                                    }
+                                    CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+                                    entry.startToken = stored.startToken;
+                                    entry.tokenCount = stored.tokenCount;
+                                    entry.rawHash = stored.rawHash;
+                                    entry.blobHash = stored.blobHash;
+                                    entry.rawBytes = stored.rawBytes;
+                                    entry.compressedBytes = stored.compressedBytes;
+                                    entry.keyDecoded.swap(seededKey);
+                                    entry.valueDecoded.swap(seededValue);
+                                    targetLayerState.decodeCacheEntries.push_back(std::move(entry));
+                                    while ((int)targetLayerState.decodeCacheEntries.size() > decodeCacheBlocks) {
+                                        targetLayerState.decodeCacheEntries.pop_front();
+                                    }
+                                }
+                            }
+                        }
                         if (zeroKvRange(mKVCacheManager.get(),
                                         mKvNumHead,
                                         mHeadDim,
