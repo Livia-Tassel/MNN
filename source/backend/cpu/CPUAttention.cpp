@@ -1149,6 +1149,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             int startToken = 0;
             int tokenCount = 0;
             uint64_t decodedBytes = 0;
+            int64_t restoreUs = 0;
             std::vector<uint8_t> keyDecoded;
             std::vector<uint8_t> valueDecoded;
         };
@@ -1206,6 +1207,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     return;
                 }
             };
+            auto restoreT0 = std::chrono::high_resolution_clock::now();
             tryDecodeCache(true);
             if (!cacheHit) {
                 // Store-mode eviction can renumber token positions; allow
@@ -1213,10 +1215,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 tryDecodeCache(false);
             }
 
-            int64_t decodeUs = 0;
             bool fallbackUsed = false;
             if (!cacheHit) {
-                auto d0 = std::chrono::high_resolution_clock::now();
                 bool keyOk = true;
                 bool valueOk = true;
                 if (!block.keyBlob.empty()) {
@@ -1237,14 +1237,16 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         valueOk = false;
                     }
                 }
-                auto d1 = std::chrono::high_resolution_clock::now();
-                decodeUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(d1 - d0).count();
                 mH2OState->globalLosslessDecodeCacheMiss += 1;
                 if (!keyOk || !valueOk) {
                     fallbackUsed = true;
                 }
             }
-            restoreState.losslessDecompressUs += decodeUs;
+            auto restoreT1 = std::chrono::high_resolution_clock::now();
+            int64_t restoreUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(restoreT1 - restoreT0).count();
+            if (restoreUs <= 0 && (cacheHit || !keyDecoded.empty() || !valueDecoded.empty())) {
+                restoreUs = 1;
+            }
             const uint64_t decodedBytes = (uint64_t)keyDecoded.size() + (uint64_t)valueDecoded.size();
             if (!fallbackUsed && decodedBytes != block.rawBytes) {
                 fallbackUsed = true;
@@ -1281,10 +1283,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 chunk.startToken = block.startToken;
                 chunk.tokenCount = block.tokenCount;
                 chunk.decodedBytes = decodedBytes;
+                chunk.restoreUs = restoreUs;
                 chunk.keyDecoded.swap(keyDecoded);
                 chunk.valueDecoded.swap(valueDecoded);
                 restoreChunks.emplace_back(std::move(chunk));
             } else {
+                restoreState.losslessDecompressUs += restoreUs;
                 restoreState.losslessFallbackCount += 1;
             }
             // Once restored (or failed irrecoverably), payload is no longer useful.
@@ -1303,6 +1307,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     if (lastEnd == chunk.startToken) {
                         last.tokenCount += chunk.tokenCount;
                         last.decodedBytes += chunk.decodedBytes;
+                        last.restoreUs += chunk.restoreUs;
                         last.keyDecoded.insert(last.keyDecoded.end(), chunk.keyDecoded.begin(), chunk.keyDecoded.end());
                         last.valueDecoded.insert(last.valueDecoded.end(), chunk.valueDecoded.begin(), chunk.valueDecoded.end());
                         continue;
@@ -1311,6 +1316,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mergedChunks.emplace_back(std::move(chunk));
             }
             for (auto& chunk : mergedChunks) {
+                auto scatterT0 = std::chrono::high_resolution_clock::now();
                 const bool restored = scatterKvMergedRange(
                     mKVCacheManager.get(),
                     mKvNumHead,
@@ -1323,6 +1329,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     chunk.tokenCount,
                     chunk.keyDecoded,
                     chunk.valueDecoded);
+                auto scatterT1 = std::chrono::high_resolution_clock::now();
+                int64_t scatterUs = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(scatterT1 - scatterT0).count();
+                if (scatterUs <= 0 && chunk.decodedBytes > 0) {
+                    scatterUs = 1;
+                }
+                restoreState.losslessDecompressUs += chunk.restoreUs + scatterUs;
                 if (restored) {
                     restoreState.losslessDecompressedBytes += chunk.decodedBytes;
                 } else {
