@@ -313,6 +313,9 @@ int main(int argc, const char* argv[]) {
     if (true) {
         AUTOTIME;
         tuning_prepare(llm.get());
+        // Tuning may execute warmup decode/prefill passes that mutate KV/H2O runtime
+        // state. Ensure real eval starts from a clean context.
+        llm->reset();
     }
     if (argc < 3) {
         chat(llm.get());
