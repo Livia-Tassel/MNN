@@ -98,7 +98,10 @@ private:
             std::function<AsyncResult()> fn;
         };
         std::vector<LayerState> layerStates;
+        // reserveStorage: active compact plan used by meta->reserve in current step.
+        // reserveStoragePending: next-step plan generated during this step.
         std::vector<int> reserveStorage;
+        std::vector<int> reserveStoragePending;
         std::mutex asyncMutex;
         std::condition_variable asyncCv;
         std::condition_variable asyncDoneCv;

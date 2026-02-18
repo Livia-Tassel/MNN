@@ -1401,9 +1401,41 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             && mMeta->remove == 0
             && mMeta->n_reserve == 0
             && mMeta->previous >= mMeta->h2o_pending_remove) {
-            mMeta->remove = mMeta->h2o_pending_remove;
-            mMeta->reserve = mMeta->h2o_pending_reserve;
-            mMeta->n_reserve = mMeta->h2o_pending_n_reserve;
+            bool planApplied = false;
+            if (mH2OState != nullptr) {
+                const int pendingPairsMeta = ALIMAX(0, mMeta->h2o_pending_n_reserve);
+                const int pendingInts = (int)mH2OState->reserveStoragePending.size();
+                const int pendingPairsBuffer = pendingInts / 2;
+                if (pendingPairsMeta == 0) {
+                    mH2OState->reserveStorage.clear();
+                    mMeta->remove = mMeta->h2o_pending_remove;
+                    mMeta->reserve = nullptr;
+                    mMeta->n_reserve = 0;
+                    planApplied = true;
+                } else if (pendingInts == pendingPairsMeta * 2) {
+                    mH2OState->reserveStorage.swap(mH2OState->reserveStoragePending);
+                    mH2OState->reserveStoragePending.clear();
+                    mMeta->remove = mMeta->h2o_pending_remove;
+                    mMeta->reserve = mH2OState->reserveStorage.empty() ? nullptr : mH2OState->reserveStorage.data();
+                    mMeta->n_reserve = (int)mH2OState->reserveStorage.size() / 2;
+                    planApplied = true;
+                } else {
+                    MNN_ERROR("Invalid pending reserve plan: meta_pairs=%d buffer_pairs=%d (ints=%d). Drop pending plan.\n",
+                              pendingPairsMeta, pendingPairsBuffer, pendingInts);
+                    mH2OState->reserveStoragePending.clear();
+                    mH2OState->reserveStorage.clear();
+                }
+            } else {
+                mMeta->remove = mMeta->h2o_pending_remove;
+                mMeta->reserve = mMeta->h2o_pending_reserve;
+                mMeta->n_reserve = mMeta->h2o_pending_n_reserve;
+                planApplied = true;
+            }
+            if (!planApplied) {
+                mMeta->remove = 0;
+                mMeta->reserve = nullptr;
+                mMeta->n_reserve = 0;
+            }
             mMeta->h2o_pending_plan_ready = 0;
             mMeta->h2o_pending_remove = 0;
             mMeta->h2o_pending_reserve = nullptr;
@@ -1591,6 +1623,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mH2OState->globalLosslessAsyncWaitUs = 0;
         mH2OState->globalLosslessDecodeCacheHit = 0;
         mH2OState->globalLosslessDecodeCacheMiss = 0;
+        mH2OState->reserveStorage.clear();
+        mH2OState->reserveStoragePending.clear();
         {
             std::unique_lock<std::mutex> lock(mH2OState->asyncMutex);
             if (mH2OState->asyncPendingTasks > 0) {
@@ -1622,6 +1656,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             state.losslessBlocks.clear();
             state.decodeCacheEntries.clear();
         }
+        mMeta->remove = 0;
+        mMeta->reserve = nullptr;
+        mMeta->n_reserve = 0;
+        mMeta->h2o_pending_plan_ready = 0;
+        mMeta->h2o_pending_remove = 0;
+        mMeta->h2o_pending_reserve = nullptr;
+        mMeta->h2o_pending_n_reserve = 0;
     }
     int h2oLayerStart = 0;
     int h2oLayerEnd = layerCount - 1;
@@ -2240,10 +2281,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const size_t reserveMetaBytes = (size_t)reservePairs.size() * sizeof(int);
 
             if (evictedTokens > 0 && !reservePairs.empty()) {
-                mH2OState->reserveStorage.swap(reservePairs);
+                mH2OState->reserveStoragePending.swap(reservePairs);
                 mMeta->h2o_pending_remove = kvSeqLen;
-                mMeta->h2o_pending_reserve = mH2OState->reserveStorage.data();
-                mMeta->h2o_pending_n_reserve = (int)mH2OState->reserveStorage.size() / 2;
+                mMeta->h2o_pending_reserve = mH2OState->reserveStoragePending.empty()
+                    ? nullptr
+                    : mH2OState->reserveStoragePending.data();
+                mMeta->h2o_pending_n_reserve = (int)mH2OState->reserveStoragePending.size() / 2;
                 mMeta->h2o_pending_plan_ready = 1;
                 mMeta->h2o_total_evict_tokens += evictedTokens;
             }
