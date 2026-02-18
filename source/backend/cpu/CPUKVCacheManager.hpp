@@ -87,6 +87,12 @@ public:
         return baseAddr + kv_h * mCurrentValueSizePerHead;
 
     }
+    size_t keySizePerHead() const {
+        return mCurrentKeySizePerHead;
+    }
+    size_t valueSizePerHead() const {
+        return mCurrentValueSizePerHead;
+    }
     void setFlashAttentionUpperKv(size_t upperKv) {
         mFlashAttentionUpperKv = upperKv;
     }

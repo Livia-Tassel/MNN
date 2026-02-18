@@ -730,7 +730,13 @@ static bool collectKvMergedRange(CPUKVCacheManager* cacheManager,
         || tokenCount <= 0
         || kvNumHead <= 0
         || headDim <= 0
-        || bytes <= 0) {
+        || bytes <= 0
+        || startToken < 0) {
+        return false;
+    }
+    const int rangeEnd = startToken + tokenCount;
+    const int activeLen = cacheManager->kvLength();
+    if (rangeEnd < startToken || rangeEnd > cacheManager->maxLength() || rangeEnd > activeLen) {
         return false;
     }
 
@@ -761,6 +767,11 @@ static bool collectKvMergedRange(CPUKVCacheManager* cacheManager,
     const size_t valueStride2 = (size_t)lPack * (size_t)hPack;
     const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
     const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
+    const size_t keyCapacity = cacheManager->keySizePerHead() / (size_t)bytes;
+    const size_t valueCapacity = cacheManager->valueSizePerHead() / (size_t)bytes;
+    if (keyCapacity == 0 || valueCapacity == 0) {
+        return false;
+    }
 
     for (size_t h = 0; h < keyPtrs.size(); ++h) {
         const uint8_t* keyPtr = keyPtrs[h];
@@ -780,6 +791,9 @@ static bool collectKvMergedRange(CPUKVCacheManager* cacheManager,
                 const size_t keyIndex = keySeqBase
                     + (size_t)(dim / lPack) * keyStride1
                     + (size_t)(dim % lPack);
+                if (keyIndex >= keyCapacity) {
+                    return false;
+                }
                 const uint8_t* keyElem = keyPtr + keyIndex * (size_t)bytes;
                 ::memcpy(keyOut, keyElem, (size_t)bytes);
                 keyOut += bytes;
@@ -787,6 +801,9 @@ static bool collectKvMergedRange(CPUKVCacheManager* cacheManager,
                 const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
                     + (size_t)(dim % hPack) * (size_t)lPack
                     + valueInner;
+                if (valueIndex >= valueCapacity) {
+                    return false;
+                }
                 const uint8_t* valueElem = valuePtr + valueIndex * (size_t)bytes;
                 ::memcpy(valueOut, valueElem, (size_t)bytes);
                 valueOut += bytes;
@@ -811,7 +828,13 @@ static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
         || tokenCount <= 0
         || kvNumHead <= 0
         || headDim <= 0
-        || bytes <= 0) {
+        || bytes <= 0
+        || startToken < 0) {
+        return false;
+    }
+    const int rangeEnd = startToken + tokenCount;
+    const int activeLen = cacheManager->kvLength();
+    if (rangeEnd < startToken || rangeEnd > cacheManager->maxLength() || rangeEnd > activeLen) {
         return false;
     }
     const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
@@ -840,6 +863,11 @@ static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
     const size_t valueStride2 = (size_t)lPack * (size_t)hPack;
     const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
     const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
+    const size_t keyCapacity = cacheManager->keySizePerHead() / (size_t)bytes;
+    const size_t valueCapacity = cacheManager->valueSizePerHead() / (size_t)bytes;
+    if (keyCapacity == 0 || valueCapacity == 0) {
+        return false;
+    }
 
     const uint8_t* keyIn = keyMerged.data();
     const uint8_t* valueIn = valueMerged.data();
@@ -861,6 +889,9 @@ static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
                 const size_t keyIndex = keySeqBase
                     + (size_t)(dim / lPack) * keyStride1
                     + (size_t)(dim % lPack);
+                if (keyIndex >= keyCapacity) {
+                    return false;
+                }
                 uint8_t* keyElem = keyPtr + keyIndex * (size_t)bytes;
                 ::memcpy(keyElem, keyIn, (size_t)bytes);
                 keyIn += bytes;
@@ -868,6 +899,9 @@ static bool scatterKvMergedRange(CPUKVCacheManager* cacheManager,
                 const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
                     + (size_t)(dim % hPack) * (size_t)lPack
                     + valueInner;
+                if (valueIndex >= valueCapacity) {
+                    return false;
+                }
                 uint8_t* valueElem = valuePtr + valueIndex * (size_t)bytes;
                 ::memcpy(valueElem, valueIn, (size_t)bytes);
                 valueIn += bytes;
@@ -890,7 +924,13 @@ static bool zeroKvRange(CPUKVCacheManager* cacheManager,
         || tokenCount <= 0
         || kvNumHead <= 0
         || headDim <= 0
-        || bytes <= 0) {
+        || bytes <= 0
+        || startToken < 0) {
+        return false;
+    }
+    const int rangeEnd = startToken + tokenCount;
+    const int activeLen = cacheManager->kvLength();
+    if (rangeEnd < startToken || rangeEnd > cacheManager->maxLength() || rangeEnd > activeLen) {
         return false;
     }
     const int safeFlashBlockKv = ALIMAX(1, flashBlockKv);
@@ -899,6 +939,11 @@ static bool zeroKvRange(CPUKVCacheManager* cacheManager,
     const size_t valueStride2 = (size_t)lPack * (size_t)hPack;
     const size_t valueStride1 = (size_t)UP_DIV(safeFlashBlockKv, lPack) * valueStride2;
     const size_t valueStride0 = valueStride1 * (size_t)UP_DIV(headDim, hPack);
+    const size_t keyCapacity = cacheManager->keySizePerHead() / (size_t)bytes;
+    const size_t valueCapacity = cacheManager->valueSizePerHead() / (size_t)bytes;
+    if (keyCapacity == 0 || valueCapacity == 0) {
+        return false;
+    }
     for (int h = 0; h < kvNumHead; ++h) {
         auto* keyPtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfKey(h));
         auto* valuePtr = reinterpret_cast<uint8_t*>(cacheManager->addrOfValue(h));
@@ -920,12 +965,18 @@ static bool zeroKvRange(CPUKVCacheManager* cacheManager,
                 const size_t keyIndex = keySeqBase
                     + (size_t)(dim / lPack) * keyStride1
                     + (size_t)(dim % lPack);
+                if (keyIndex >= keyCapacity) {
+                    return false;
+                }
                 auto* keyElem = keyPtr + keyIndex * (size_t)bytes;
                 ::memset(keyElem, 0, (size_t)bytes);
 
                 const size_t valueIndex = (size_t)(dim / hPack) * valueStride1
                     + (size_t)(dim % hPack) * (size_t)lPack
                     + valueInner;
+                if (valueIndex >= valueCapacity) {
+                    return false;
+                }
                 auto* valueElem = valuePtr + valueIndex * (size_t)bytes;
                 ::memset(valueElem, 0, (size_t)bytes);
             }
@@ -2554,6 +2605,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 }
                 auto& targetLayerState = mH2OState->layerStates[targetLayerIndex];
                 if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
+                    const int maxLen = mKVCacheManager != nullptr ? mKVCacheManager->maxLength() : 0;
+                    const int endToken = startToken + tokenCount;
+                    if (startToken < 0 || tokenCount <= 0 || endToken < startToken || endToken > maxLen) {
+                        targetLayerState.losslessFallbackCount += 1;
+                        return;
+                    }
                     CPUAttention::H2OSharedState::LayerState::LosslessBlock block;
                     block.startToken = startToken;
                     block.tokenCount = tokenCount;
