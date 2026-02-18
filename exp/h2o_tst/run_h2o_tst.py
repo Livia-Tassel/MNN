@@ -325,7 +325,7 @@ def main() -> int:
         "PROMPT_DIR": env_str("PROMPT_DIR", "/home10T/ljq/MNN/exp/gear_fp16/prompts"),
         "PROMPT_PATTERN": env_str("PROMPT_PATTERN", "prompt_*.txt"),
         "PROMPT_MANIFEST": env_str("PROMPT_MANIFEST", ""),
-        "PROMPT_BUCKET_LIST": env_str("PROMPT_BUCKET_LIST", "128,512"),
+        "PROMPT_BUCKET_LIST": env_str("PROMPT_BUCKET_LIST", "2048"),
         "PROMPT_SAMPLE_MODE": env_str("PROMPT_SAMPLE_MODE", "stratified"),
         "MAX_PROMPTS": str(env_int("MAX_PROMPTS", 0)),
         "MAX_PROMPTS_PER_BUCKET": str(env_int("MAX_PROMPTS_PER_BUCKET", 1)),

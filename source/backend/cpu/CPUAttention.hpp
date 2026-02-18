@@ -102,6 +102,8 @@ private:
         // reserveStoragePending: next-step plan generated during this step.
         std::vector<int> reserveStorage;
         std::vector<int> reserveStoragePending;
+        // Cross-layer decoded cache to improve reuse for repeated compressed blocks.
+        std::deque<LayerState::DecodedCacheEntry> globalDecodeCacheEntries;
         std::mutex asyncMutex;
         std::condition_variable asyncCv;
         std::condition_variable asyncDoneCv;

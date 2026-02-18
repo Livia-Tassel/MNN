@@ -1208,9 +1208,86 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         const int flashBlockKv = ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv());
         const bool strictRoundtrip = (mMeta->h2o_lossless_strict_roundtrip_check != 0);
         const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
+        const int globalDecodeCacheBlocks = (decodeCacheBlocks > 0)
+            ? ALIMAX(4, ALIMIN(16, decodeCacheBlocks))
+            : 0;
         if (decodeCacheBlocks <= 0) {
             restoreState.decodeCacheEntries.clear();
+            mH2OState->globalDecodeCacheEntries.clear();
         }
+        auto appendLocalDecodeCache = [&](int startToken,
+                                          int tokenCount,
+                                          uint64_t rawHash,
+                                          uint64_t blobHash,
+                                          uint64_t rawBytes,
+                                          uint64_t compressedBytes,
+                                          const std::vector<uint8_t>& keyDecoded,
+                                          const std::vector<uint8_t>& valueDecoded) {
+            if (decodeCacheBlocks <= 0) {
+                return;
+            }
+            for (auto cIt = restoreState.decodeCacheEntries.begin();
+                 cIt != restoreState.decodeCacheEntries.end();) {
+                const bool posMatch = cIt->startToken == startToken && cIt->tokenCount == tokenCount;
+                const bool bytesMatch = cIt->rawBytes == rawBytes && cIt->compressedBytes == compressedBytes;
+                const bool hashMatch = (rawHash != 0 && cIt->rawHash == rawHash)
+                    || (blobHash != 0 && cIt->blobHash == blobHash);
+                if ((posMatch && bytesMatch) || (bytesMatch && hashMatch)) {
+                    cIt = restoreState.decodeCacheEntries.erase(cIt);
+                } else {
+                    ++cIt;
+                }
+            }
+            CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+            entry.startToken = startToken;
+            entry.tokenCount = tokenCount;
+            entry.rawHash = rawHash;
+            entry.blobHash = blobHash;
+            entry.rawBytes = rawBytes;
+            entry.compressedBytes = compressedBytes;
+            entry.keyDecoded = keyDecoded;
+            entry.valueDecoded = valueDecoded;
+            restoreState.decodeCacheEntries.push_back(std::move(entry));
+            while ((int)restoreState.decodeCacheEntries.size() > decodeCacheBlocks) {
+                restoreState.decodeCacheEntries.pop_front();
+            }
+        };
+        auto appendGlobalDecodeCache = [&](int startToken,
+                                           int tokenCount,
+                                           uint64_t rawHash,
+                                           uint64_t blobHash,
+                                           uint64_t rawBytes,
+                                           uint64_t compressedBytes,
+                                           const std::vector<uint8_t>& keyDecoded,
+                                           const std::vector<uint8_t>& valueDecoded) {
+            if (globalDecodeCacheBlocks <= 0) {
+                return;
+            }
+            auto& globalCache = mH2OState->globalDecodeCacheEntries;
+            for (auto cIt = globalCache.begin(); cIt != globalCache.end();) {
+                const bool bytesMatch = cIt->rawBytes == rawBytes && cIt->compressedBytes == compressedBytes;
+                const bool hashMatch = (rawHash != 0 && cIt->rawHash == rawHash)
+                    || (blobHash != 0 && cIt->blobHash == blobHash);
+                if (bytesMatch && hashMatch) {
+                    cIt = globalCache.erase(cIt);
+                } else {
+                    ++cIt;
+                }
+            }
+            CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+            entry.startToken = startToken;
+            entry.tokenCount = tokenCount;
+            entry.rawHash = rawHash;
+            entry.blobHash = blobHash;
+            entry.rawBytes = rawBytes;
+            entry.compressedBytes = compressedBytes;
+            entry.keyDecoded = keyDecoded;
+            entry.valueDecoded = valueDecoded;
+            globalCache.push_back(std::move(entry));
+            while ((int)globalCache.size() > globalDecodeCacheBlocks) {
+                globalCache.pop_front();
+            }
+        };
         std::vector<RestoreChunk> restoreChunks;
         restoreChunks.reserve(restoreState.losslessBlocks.size());
         for (auto it = restoreState.losslessBlocks.begin(); it != restoreState.losslessBlocks.end();) {
@@ -1265,6 +1342,38 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 // hash+bytes match fallback for eviction-invariant reuse.
                 tryDecodeCache(false);
             }
+            if (!cacheHit && globalDecodeCacheBlocks > 0) {
+                auto& globalCache = mH2OState->globalDecodeCacheEntries;
+                for (auto cIt = globalCache.begin(); cIt != globalCache.end(); ++cIt) {
+                    const bool bytesMatch = cIt->rawBytes == block.rawBytes
+                        && cIt->compressedBytes == block.compressedBytes;
+                    if (!bytesMatch) {
+                        continue;
+                    }
+                    const bool hashMatch = (block.rawHash != 0 && cIt->rawHash == block.rawHash)
+                        || (blobHash != 0 && cIt->blobHash == blobHash);
+                    if (!hashMatch) {
+                        continue;
+                    }
+                    keyDecoded = cIt->keyDecoded;
+                    valueDecoded = cIt->valueDecoded;
+                    auto entry = std::move(*cIt);
+                    globalCache.erase(cIt);
+                    globalCache.push_back(std::move(entry));
+                    cacheHit = true;
+                    mH2OState->globalLosslessDecodeCacheHit += 1;
+                    appendLocalDecodeCache(
+                        block.startToken,
+                        block.tokenCount,
+                        block.rawHash,
+                        blobHash,
+                        block.rawBytes,
+                        block.compressedBytes,
+                        keyDecoded,
+                        valueDecoded);
+                    break;
+                }
+            }
 
             bool fallbackUsed = false;
             if (!cacheHit) {
@@ -1313,20 +1422,27 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                 }
             }
-            if (!fallbackUsed && !cacheHit && decodeCacheBlocks > 0) {
-                CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
-                entry.startToken = block.startToken;
-                entry.tokenCount = block.tokenCount;
-                entry.rawHash = block.rawHash;
-                entry.blobHash = blobHash;
-                entry.rawBytes = block.rawBytes;
-                entry.compressedBytes = block.compressedBytes;
-                entry.keyDecoded = keyDecoded;
-                entry.valueDecoded = valueDecoded;
-                restoreState.decodeCacheEntries.push_back(std::move(entry));
-                while ((int)restoreState.decodeCacheEntries.size() > decodeCacheBlocks) {
-                    restoreState.decodeCacheEntries.pop_front();
+            if (!fallbackUsed) {
+                if (!cacheHit) {
+                    appendLocalDecodeCache(
+                        block.startToken,
+                        block.tokenCount,
+                        block.rawHash,
+                        blobHash,
+                        block.rawBytes,
+                        block.compressedBytes,
+                        keyDecoded,
+                        valueDecoded);
                 }
+                appendGlobalDecodeCache(
+                    block.startToken,
+                    block.tokenCount,
+                    block.rawHash,
+                    blobHash,
+                    block.rawBytes,
+                    block.compressedBytes,
+                    keyDecoded,
+                    valueDecoded);
             }
 
             if (!fallbackUsed) {
@@ -2505,6 +2621,87 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         };
 
         auto decodeOnePendingLosslessBlock = [&](CPUAttention::H2OSharedState::LayerState& layerState) {
+            const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
+            const int globalDecodeCacheBlocks = (decodeCacheBlocks > 0)
+                ? ALIMAX(4, ALIMIN(16, decodeCacheBlocks))
+                : 0;
+            if (decodeCacheBlocks <= 0) {
+                layerState.decodeCacheEntries.clear();
+                mH2OState->globalDecodeCacheEntries.clear();
+            }
+            auto appendLocalDecodeCache = [&](int startToken,
+                                              int tokenCount,
+                                              uint64_t rawHash,
+                                              uint64_t blobHash,
+                                              uint64_t rawBytes,
+                                              uint64_t compressedBytes,
+                                              const std::vector<uint8_t>& keyDecoded,
+                                              const std::vector<uint8_t>& valueDecoded) {
+                if (decodeCacheBlocks <= 0) {
+                    return;
+                }
+                for (auto cIt = layerState.decodeCacheEntries.begin();
+                     cIt != layerState.decodeCacheEntries.end();) {
+                    const bool posMatch = cIt->startToken == startToken && cIt->tokenCount == tokenCount;
+                    const bool bytesMatch = cIt->rawBytes == rawBytes && cIt->compressedBytes == compressedBytes;
+                    const bool hashMatch = (rawHash != 0 && cIt->rawHash == rawHash)
+                        || (blobHash != 0 && cIt->blobHash == blobHash);
+                    if ((posMatch && bytesMatch) || (bytesMatch && hashMatch)) {
+                        cIt = layerState.decodeCacheEntries.erase(cIt);
+                    } else {
+                        ++cIt;
+                    }
+                }
+                CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+                entry.startToken = startToken;
+                entry.tokenCount = tokenCount;
+                entry.rawHash = rawHash;
+                entry.blobHash = blobHash;
+                entry.rawBytes = rawBytes;
+                entry.compressedBytes = compressedBytes;
+                entry.keyDecoded = keyDecoded;
+                entry.valueDecoded = valueDecoded;
+                layerState.decodeCacheEntries.push_back(std::move(entry));
+                while ((int)layerState.decodeCacheEntries.size() > decodeCacheBlocks) {
+                    layerState.decodeCacheEntries.pop_front();
+                }
+            };
+            auto appendGlobalDecodeCache = [&](int startToken,
+                                               int tokenCount,
+                                               uint64_t rawHash,
+                                               uint64_t blobHash,
+                                               uint64_t rawBytes,
+                                               uint64_t compressedBytes,
+                                               const std::vector<uint8_t>& keyDecoded,
+                                               const std::vector<uint8_t>& valueDecoded) {
+                if (globalDecodeCacheBlocks <= 0) {
+                    return;
+                }
+                auto& globalCache = mH2OState->globalDecodeCacheEntries;
+                for (auto cIt = globalCache.begin(); cIt != globalCache.end();) {
+                    const bool bytesMatch = cIt->rawBytes == rawBytes && cIt->compressedBytes == compressedBytes;
+                    const bool hashMatch = (rawHash != 0 && cIt->rawHash == rawHash)
+                        || (blobHash != 0 && cIt->blobHash == blobHash);
+                    if (bytesMatch && hashMatch) {
+                        cIt = globalCache.erase(cIt);
+                    } else {
+                        ++cIt;
+                    }
+                }
+                CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
+                entry.startToken = startToken;
+                entry.tokenCount = tokenCount;
+                entry.rawHash = rawHash;
+                entry.blobHash = blobHash;
+                entry.rawBytes = rawBytes;
+                entry.compressedBytes = compressedBytes;
+                entry.keyDecoded = keyDecoded;
+                entry.valueDecoded = valueDecoded;
+                globalCache.push_back(std::move(entry));
+                while ((int)globalCache.size() > globalDecodeCacheBlocks) {
+                    globalCache.pop_front();
+                }
+            };
             for (auto& block : layerState.losslessBlocks) {
                 if (block.decodedOnce) {
                     continue;
@@ -2554,6 +2751,38 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 if (!cacheHit) {
                     tryDecodeCache(false);
                 }
+                if (!cacheHit && globalDecodeCacheBlocks > 0) {
+                    auto& globalCache = mH2OState->globalDecodeCacheEntries;
+                    for (auto cIt = globalCache.begin(); cIt != globalCache.end(); ++cIt) {
+                        const bool bytesMatch = cIt->rawBytes == block.rawBytes
+                            && cIt->compressedBytes == block.compressedBytes;
+                        if (!bytesMatch) {
+                            continue;
+                        }
+                        const bool hashMatch = (block.rawHash != 0 && cIt->rawHash == block.rawHash)
+                            || (blockBlobHash != 0 && cIt->blobHash == blockBlobHash);
+                        if (!hashMatch) {
+                            continue;
+                        }
+                        keyDecoded = cIt->keyDecoded;
+                        valueDecoded = cIt->valueDecoded;
+                        auto entry = std::move(*cIt);
+                        globalCache.erase(cIt);
+                        globalCache.push_back(std::move(entry));
+                        cacheHit = true;
+                        mH2OState->globalLosslessDecodeCacheHit += 1;
+                        appendLocalDecodeCache(
+                            block.startToken,
+                            block.tokenCount,
+                            block.rawHash,
+                            blockBlobHash,
+                            block.rawBytes,
+                            block.compressedBytes,
+                            keyDecoded,
+                            valueDecoded);
+                        break;
+                    }
+                }
                 if (!cacheHit) {
                     auto d0 = std::chrono::high_resolution_clock::now();
                     bool keyOk = true;
@@ -2596,25 +2825,25 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                 }
                 if (!cacheHit) {
-                    CPUAttention::H2OSharedState::LayerState::DecodedCacheEntry entry;
-                    entry.startToken = block.startToken;
-                    entry.tokenCount = block.tokenCount;
-                    entry.rawHash = block.rawHash;
-                    entry.blobHash = blockBlobHash;
-                    entry.rawBytes = block.rawBytes;
-                    entry.compressedBytes = block.compressedBytes;
-                    entry.keyDecoded = keyDecoded;
-                    entry.valueDecoded = valueDecoded;
-                    layerState.decodeCacheEntries.push_back(std::move(entry));
-                    const int decodeCacheBlocks = ALIMAX(0, mMeta->h2o_lossless_decode_cache_blocks);
-                    if (decodeCacheBlocks <= 0) {
-                        layerState.decodeCacheEntries.clear();
-                    } else {
-                        while ((int)layerState.decodeCacheEntries.size() > decodeCacheBlocks) {
-                            layerState.decodeCacheEntries.pop_front();
-                        }
-                    }
+                    appendLocalDecodeCache(
+                        block.startToken,
+                        block.tokenCount,
+                        block.rawHash,
+                        blockBlobHash,
+                        block.rawBytes,
+                        block.compressedBytes,
+                        keyDecoded,
+                        valueDecoded);
                 }
+                appendGlobalDecodeCache(
+                    block.startToken,
+                    block.tokenCount,
+                    block.rawHash,
+                    blockBlobHash,
+                    block.rawBytes,
+                    block.compressedBytes,
+                    keyDecoded,
+                    valueDecoded);
                 layerState.losslessDecompressedBytes += decodedBytes;
                 return;
             }

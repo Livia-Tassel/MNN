@@ -12,7 +12,7 @@ bash exp/h2o_tst/test_h2o_tst.sh
 默认会顺序执行：
 1. `runtime_full`（`test_v6_runtime.sh`）
 2. `runtime_store`（`test_v6_runtime.sh`，store参数）
-3. `llm_demo`（`test_v6_llm_demo.sh`，默认 128/512 分桶、每桶 1 条 prompt）
+3. `llm_demo`（`test_v6_llm_demo.sh`，默认仅 2048 分桶、每桶 1 条 prompt）
    - `llm_demo` 默认使用 full 模式（`KV_LOSSLESS_RUNTIME_MODE=full`）
 
 ## 输出目录
@@ -40,7 +40,7 @@ bash exp/h2o_tst/test_h2o_tst.sh
   - `STORE_MAX_LOSSLESS_DECOMP_US`（默认 `70000`）
 - llm_demo 采样：
   - `PROMPT_DIR`（默认 `/home10T/ljq/MNN/exp/gear_fp16/prompts`）
-  - `PROMPT_BUCKET_LIST`（默认 `128,512`）
+  - `PROMPT_BUCKET_LIST`（默认 `2048`）
   - `MAX_PROMPTS_PER_BUCKET`（默认 `1`）
 - llm_demo 稳定性参数：
   - `LLM_DEMO_KV_LOSSLESS_RUNTIME_MODE`（默认 `full`）
