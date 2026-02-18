@@ -44,6 +44,13 @@ def load_metrics_jsonl(path: Path):
     except Exception:
         return {}
 
+def summarize_returncode(rc: int) -> str:
+    if rc == 0:
+        return "ok"
+    if rc < 0:
+        return f"signal_{-rc}"
+    return f"rc_{rc}"
+
 
 def safe_div(a: float, b: float) -> float:
     if b <= 0:
@@ -366,13 +373,16 @@ def main():
         h2o_metrics = load_metrics_jsonl(metrics_path)
 
         effective_rc = int(proc.returncode)
+        reason = summarize_returncode(proc.returncode)
         if "LLM init error" in (stdout + "\n" + stderr):
             effective_rc = 1
-        if effective_rc == 0 and not (
-            has_cli_summary_metrics(cli_metrics) or has_jsonl_summary_metrics(h2o_metrics)
-        ):
+            reason = "llm_init_error"
+        has_cli_summary = has_cli_summary_metrics(cli_metrics)
+        has_jsonl_summary = has_jsonl_summary_metrics(h2o_metrics)
+        if effective_rc == 0 and not (has_cli_summary or has_jsonl_summary):
             # Treat "instant success with no metrics" as invalid run.
             effective_rc = 2
+            reason = "missing_summary_metrics"
 
         cli_prompt_tokens = int(cli_metrics.get("prompt_tokens", 0))
         cli_decode_tokens = int(cli_metrics.get("decode_tokens", 0))
@@ -397,6 +407,9 @@ def main():
             "prompt_bucket": infer_prompt_bucket(prompt_file),
             "returncode": proc.returncode,
             "effective_returncode": effective_rc,
+            "status_reason": reason,
+            "has_cli_summary_metrics": has_cli_summary,
+            "has_jsonl_summary_metrics": has_jsonl_summary,
             "prompt_tokens": prompt_tokens,
             "decode_tokens": decode_tokens,
             "prefill_s": prefill_s,
@@ -508,6 +521,9 @@ def main():
         lines.append(
             f"- {Path(r['prompt_file']).name} [bucket={r.get('prompt_bucket', 'other')}]: "
             f"rc={r['returncode']}, effective_rc={r['effective_returncode']}, "
+            f"reason={r.get('status_reason', '')}, "
+            f"cli_summary={str(bool(r.get('has_cli_summary_metrics', False))).lower()}, "
+            f"jsonl_summary={str(bool(r.get('has_jsonl_summary_metrics', False))).lower()}, "
             f"decode_tps={float(r.get('decode_tps', 0.0)):.4f}, "
             f"keep={float(h2o.get('h2o_keep_ratio', 0.0)):.4f}, "
             f"lossy={float(h2o.get('h2o_lossy_ratio', 0.0)):.4f}, "
