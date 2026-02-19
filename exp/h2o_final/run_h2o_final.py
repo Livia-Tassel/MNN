@@ -137,6 +137,8 @@ def runtime_row(
         "quality_status": gate.get("quality_status", ""),
         "lossy_best": parse_float(gate.get("lossy_best", 0.0)),
         "lossless_selected_value": parse_float(gate.get("lossless_selected_value", 0.0)),
+        "decode_aggregation": gate.get("decode_aggregation", "best"),
+        "decode_gate_tps": parse_float(gate.get("decode_gate_tps", gate.get("decode_best", 0.0))),
         "decode_best": parse_float(gate.get("decode_best", 0.0)),
         "decode_baseline": parse_float(gate.get("decode_baseline", 0.0)),
         "decode_drop_ratio": parse_float(gate.get("decode_drop_ratio", 0.0)),
@@ -254,7 +256,8 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
             reason_seg = f", reason={reason}" if reason else ""
             lines.append(
                 f"{i}. case={r['case']}, mode={r.get('mode','')}, pass={str(r['overall_pass']).lower()}, rc={r['return_code']}, "
-                f"decode={r['decode_best']:.4f}/{r['decode_baseline']:.4f}, "
+                f"decode={r.get('decode_gate_tps', r['decode_best']):.4f}/{r['decode_baseline']:.4f}"
+                f"({r.get('decode_aggregation', 'best')}), "
                 f"drop={r['decode_drop_ratio']:.6f}/{r['decode_drop_target']:.6f}, "
                 f"lossy={r['lossy_best']:.4f}, lossless={r['lossless_selected_value']:.4f}, "
                 f"decomp_us={r['runtime_decomp_best_us']:.4f}, async_wait_us={r['runtime_async_wait_best_us']:.4f}, "

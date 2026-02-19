@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import math
 import re
 from pathlib import Path
 
@@ -65,6 +66,12 @@ def main():
     parser.add_argument("--lossy-target", type=float, default=3.0)
     parser.add_argument("--lossless-target", type=float, default=1.3)
     parser.add_argument("--decode-baseline", type=float, default=0.0, help="Baseline decode TPS for regression gate.")
+    parser.add_argument(
+        "--decode-gate-aggregation",
+        choices=["avg", "median", "p90", "best"],
+        default="avg",
+        help="Aggregation used for decode regression gate.",
+    )
     parser.add_argument(
         "--decode-baseline-source",
         default="",
@@ -238,10 +245,29 @@ def main():
         row["_total_upper"] = row["_h2o_lossy"] * (upper_lossless if upper_lossless > 0.0 else selected_lossless)
         row["_total_online"] = row["_h2o_lossy"] * (online_lossless if online_lossless > 0.0 else selected_lossless)
 
+    decode_tps_sorted = sorted(r["_decode_tps"] for r in rows)
+    decode_avg = sum(decode_tps_sorted) / len(decode_tps_sorted)
+    if len(decode_tps_sorted) % 2 == 1:
+        decode_median = decode_tps_sorted[len(decode_tps_sorted) // 2]
+    else:
+        mid = len(decode_tps_sorted) // 2
+        decode_median = (decode_tps_sorted[mid - 1] + decode_tps_sorted[mid]) / 2.0
+    p90_index = max(0, min(len(decode_tps_sorted) - 1, math.ceil(0.9 * len(decode_tps_sorted)) - 1))
+    decode_p90 = decode_tps_sorted[p90_index]
+
     best_lossy = max(rows, key=lambda r: r["_h2o_lossy"])
     best_decode = max(rows, key=lambda r: r["_decode_tps"])
     best_total_selected = max(rows, key=lambda r: r["_total_selected"])
     pareto_rows = sorted(rows, key=lambda r: (r["_total_selected"], r["_decode_tps"]), reverse=True)[:5]
+
+    if args.decode_gate_aggregation == "best":
+        decode_gate_tps = best_decode["_decode_tps"]
+    elif args.decode_gate_aggregation == "median":
+        decode_gate_tps = decode_median
+    elif args.decode_gate_aggregation == "p90":
+        decode_gate_tps = decode_p90
+    else:
+        decode_gate_tps = decode_avg
 
     lossy_best = best_lossy["_h2o_lossy"]
     lossy_pass = lossy_best >= args.lossy_target
@@ -310,8 +336,9 @@ def main():
     )
     decode_drop_ratio = 0.0
     decode_pass = True
+    decode_gate_enabled = args.decode_baseline > 0.0
     if args.decode_baseline > 0.0:
-        decode_drop_ratio = (args.decode_baseline - best_decode["_decode_tps"]) / args.decode_baseline
+        decode_drop_ratio = (args.decode_baseline - decode_gate_tps) / args.decode_baseline
         decode_pass = decode_drop_ratio <= args.decode_drop_target
     overall_pass = (
         lossy_pass
@@ -472,6 +499,12 @@ def main():
         )
         f.write(f"- runtime_decomp_pass: {format_gate_bool(runtime_decomp_pass)}\n")
         f.write(f"- overall_pass: {format_gate_bool(overall_pass)}\n")
+        f.write(f"- decode_gate_enabled: {format_gate_bool(decode_gate_enabled)}\n")
+        f.write(f"- decode_aggregation: {args.decode_gate_aggregation}\n")
+        f.write(f"- decode_gate_tps: {decode_gate_tps:.4f}\n")
+        f.write(f"- decode_avg_tps: {decode_avg:.4f}\n")
+        f.write(f"- decode_median_tps: {decode_median:.4f}\n")
+        f.write(f"- decode_p90_tps: {decode_p90:.4f}\n")
         if args.decode_baseline > 0.0:
             f.write(f"- decode_baseline: {args.decode_baseline:.4f}\n")
             if args.decode_baseline_source:
