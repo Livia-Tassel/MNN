@@ -1,0 +1,16 @@
+You are a careful reasoning assistant.
+
+Task: Read the scenario and answer the questions with clear, minimal steps.
+
+Scenario:
+A lab measures a battery pack. The label says “Nominal 12.0 V, 3.0 Ah”. In a test, the pack powers a 6.0 W device continuously for 5 hours before shutting down. The engineer claims the label must be wrong.
+
+Questions:
+1) Compute the energy delivered in watt-hours.
+2) Compute the labeled energy in watt-hours (use nominal values).
+3) Is the engineer’s conclusion necessarily valid? Answer yes/no and give one-sentence justification.
+
+Output format:
+energy_delivered=...
+energy_labeled=...
+conclusion=...

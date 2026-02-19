@@ -1,0 +1,389 @@
+You are a multi-skill assistant (writing + extraction + formatting). You will receive a long piece of messy content. Your job is to create a polished deliverable set.
+
+INPUT (messy content):
+---
+Title idea: "Project Aurora - Q2 Launch Plan"
+Random notes:
+- Goal: launch v1 to 3 pilot customers, get retention signal within 30 days
+- Target date: June 18 (but might slip 1-2 weeks)
+- Core features: SSO, audit logs, role-based access, export to CSV
+- Non-goals: mobile app, offline mode, "AI assistant"
+- Risks: security review backlog; unclear success metric; sales wants custom features
+- Dependencies: Identity team delivers SSO library update; Legal approves DPA template; Data team provides event schema
+- People: PM=Rita, Eng lead=Marco, Design=Zoe, Security=Noah, Sales=Ivy
+- Meeting cadence: weekly status Tue 10:00; exec update every other Friday
+- Success metrics draft:
+  * activation rate (users who connect SSO within 7 days)
+  * weekly active teams
+  * churn after 30 days
+  * time-to-first-value (TTFV) target < 10 minutes
+- Open questions:
+  * how to define “pilot success”?
+  * do we gate export behind Pro?
+  * what is the minimum audit log scope?
+- Timeline rough:
+  * Apr: finalize scope + designs
+  * May: implement + internal dogfood
+  * Jun: pilot + feedback + bugfix
+- Budget: can't add headcount; can use up to $8k for external pen test
+Also there's a short email draft at the end:
+“hey everyone, aurora is kinda behind, pls update me, thx”
+---
+
+DELIVERABLES:
+1) A one-page launch plan in Markdown with clear sections (Overview, Scope, Timeline, Owners, Dependencies, Risks, Metrics, Open Questions).
+2) A structured JSON object called `aurora_plan` capturing: goal, target_date, features, non_goals, risks, dependencies, owners, cadence, success_metrics, open_questions, budget.
+3) Rewrite the email draft into a professional update email (subject + body). Keep it friendly but direct.
+
+CONSTRAINTS:
+- Do not add new features, dates, or people.
+- If something is ambiguous, keep it as a note rather than guessing.
+- For the Markdown plan, keep it concise but complete (roughly 300–500 words).
+- Output in this exact order: (1) Markdown, (2) JSON, (3) Email.
+- For JSON: double quotes, valid JSON only, no trailing commas.
+
+Begin.
+
+Do not repeat the input verbatim unless asked.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Do not include any extra commentary outside the deliverables.
+
+Use consistent tense and tone throughout the output.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Follow the requested output format strictly.
+
+Follow the requested output format strictly.
+
+Use consistent tense and tone throughout the output.
+
+Preserve all proper nouns and numbers exactly as written.
+
+If something is missing, leave it blank rather than guessing.
+
+Use consistent tense and tone throughout the output.
+
+Use clear headings and bullet points where appropriate.
+
+Avoid unnecessary verbosity; keep it readable.
+
+If there are multiple valid options, choose one and proceed.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not repeat the input verbatim unless asked.
+
+If there are multiple valid options, choose one and proceed.
+
+Use clear headings and bullet points where appropriate.
+
+Avoid unnecessary verbosity; keep it readable.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Use consistent tense and tone throughout the output.
+
+Do not include any extra commentary outside the deliverables.
+
+Do not include any extra commentary outside the deliverables.
+
+Use clear headings and bullet points where appropriate.
+
+Use consistent tense and tone throughout the output.
+
+Use clear headings and bullet points where appropriate.
+
+Avoid unnecessary verbosity; keep it readable.
+
+If something is missing, leave it blank rather than guessing.
+
+If there are multiple valid options, choose one and proceed.
+
+Use clear headings and bullet points where appropriate.
+
+If there are multiple valid options, choose one and proceed.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Use consistent tense and tone throughout the output.
+
+If there are multiple valid options, choose one and proceed.
+
+If there are multiple valid options, choose one and proceed.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Do not repeat the input verbatim unless asked.
+
+If something is missing, leave it blank rather than guessing.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not include any extra commentary outside the deliverables.
+
+If something is missing, leave it blank rather than guessing.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not include any extra commentary outside the deliverables.
+
+Do not include any extra commentary outside the deliverables.
+
+Follow the requested output format strictly.
+
+Use clear headings and bullet points where appropriate.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not include any extra commentary outside the deliverables.
+
+If something is missing, leave it blank rather than guessing.
+
+Use clear headings and bullet points where appropriate.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Follow the requested output format strictly.
+
+Follow the requested output format strictly.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Do not repeat the input verbatim unless asked.
+
+Follow the requested output format strictly.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Follow the requested output format strictly.
+
+Do not include any extra commentary outside the deliverables.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not repeat the input verbatim unless asked.
+
+Do not repeat the input verbatim unless asked.
+
+If there are multiple valid options, choose one and proceed.
+
+Follow the requested output format strictly.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Use consistent tense and tone throughout the output.
+
+Follow the requested output format strictly.
+
+Do not repeat the input verbatim unless asked.
+
+If there are multiple valid options, choose one and proceed.
+
+Use clear headings and bullet points where appropriate.
+
+Use clear headings and bullet points where appropriate.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Use clear headings and bullet points where appropriate.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+Do not include any extra commentary outside the deliverables.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Use clear headings and bullet points where appropriate.
+
+Do not repeat the input verbatim unless asked.
+
+Follow the requested output format strictly.
+
+If something is missing, leave it blank rather than guessing.
+
+Follow the requested output format strictly.
+
+Use consistent tense and tone throughout the output.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not repeat the input verbatim unless asked.
+
+Use consistent tense and tone throughout the output.
+
+Use clear headings and bullet points where appropriate.
+
+Preserve all proper nouns and numbers exactly as written.
+
+If there are multiple valid options, choose one and proceed.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+If something is missing, leave it blank rather than guessing.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Follow the requested output format strictly.
+
+Follow the requested output format strictly.
+
+Avoid unnecessary verbosity; keep it readable.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Follow the requested output format strictly.
+
+Do not include any extra commentary outside the deliverables.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+Use clear headings and bullet points where appropriate.
+
+Use clear headings and bullet points where appropriate.
+
+Use clear headings and bullet points where appropriate.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not include any extra commentary outside the deliverables.
+
+Do not include any extra commentary outside the deliverables.
+
+If there are multiple valid options, choose one and proceed.
+
+Use clear headings and bullet points where appropriate.
+
+If something is missing, leave it blank rather than guessing.
+
+Preserve all proper nouns and numbers exactly as written.
+
+If something is missing, leave it blank rather than guessing.
+
+Use consistent tense and tone throughout the output.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use clear headings and bullet points where appropriate.
+
+Follow the requested output format strictly.
+
+Do not repeat the input verbatim unless asked.
+
+Follow the requested output format strictly.
+
+If something is missing, leave it blank rather than guessing.
+
+If there are multiple valid options, choose one and proceed.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+Do not repeat the input verbatim unless asked.
+
+Use consistent tense and tone throughout the output.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use consistent tense and tone throughout the output.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use clear headings and bullet points where appropriate.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+If there are multiple valid options, choose one and proceed.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Preserve all proper nouns and numbers exactly as written.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Preserve all proper nouns and numbers exactly as written.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Use clear headings and bullet points where appropriate.
+
+Preserve all proper nouns and numbers exactly as written.
+
+If there are multiple valid options, choose one and proceed.
+
+If something is missing, leave it blank rather than guessing.
+
+If there are multiple valid options, choose one and proceed.
+
+If something is missing, leave it blank rather than guessing.
+
+Use clear headings and bullet points where appropriate.
+
+Use clear headings and bullet points where appropriate.
+
+Do not repeat the input verbatim unless asked.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Follow the requested output format strictly.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not repeat the input verbatim unless asked.
+
+Do not include any extra commentary outside the deliverables.
+
+If there are multiple valid options, choose one and proceed.
+
+Do not include any extra commentary outside the deliverables.
+
+If there are multiple valid options, choose one and proceed.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Use consistent tense and tone throughout the output.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Use clear headings and bullet points where appropriate.
+
+Do not repeat the input verbatim unless asked.
