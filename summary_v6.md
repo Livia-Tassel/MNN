@@ -63,7 +63,7 @@
 - 新增：跨层全局 `globalDecodeCacheEntries`（轻量容量），用于相同压缩块复用；
 - store 恢复路径和 full 路径都接入了“层内 + 全局”两级查找。
 
-说明：该“全局缓存”是刚合入的优化，需用新一轮测试确认命中率提升幅度。
+说明：该“全局缓存”已完成回归验证，本轮真实 prompt 出现 `decode_cache_hit_max=30`（2048 桶）。
 
 ## 4. 关键问题修复记录（已落地）
 
@@ -96,22 +96,35 @@
 
 ## 5. 最新已回传指标（作为当前基线）
 
-## 5.1 真实 Prompt（candidate，最近成功轮）
+## 5.1 真实 Prompt（candidate，最新基线）
+
+来源：`exp/h2o_tst/out_20260218_211518/llm_demo/candidate`
+
+本轮参数：
+
+- `prompt_pattern=prompt_*.txt`
+- `sample_mode=stratified`
+- `max_prompts=0`
+- `max_prompts_per_bucket=1`
+- `bucket_order=['2048','128','512']`
+- `decode_tokens=512`
+
+本轮总结果：
 
 - `total_runs=3`，`pass_runs=3`，`overall_pass=true`
-- `decode_tps_avg=6.1531`（min `5.4970` / max `6.5149`）
+- `decode_tps_avg=6.2277`（min `6.0602` / max `6.3484`）
 - `h2o_keep_ratio_avg=0.3333`
 - `h2o_lossy_ratio_avg=3.0000`
-- `h2o_lossless_ratio_avg=1.4301`
-- `h2o_runtime_total_ratio_avg=4.2902`
-- `runtime_decomp_us_max=14141`
-- `decode_cache_hit_max=0`
+- `h2o_lossless_ratio_avg=3.8076`
+- `h2o_runtime_total_ratio_avg=11.4228`
+- `runtime_decomp_us_max=17301`
+- `decode_cache_hit_max=30`
 
 分桶：
 
-- `2048`：decode `6.5149`，lossless `1.4706`
-- `128`：decode `6.4474`，lossless `1.3447`
-- `512`：decode `5.4970`，lossless `1.4749`
+- `2048`：decode `6.0602`，lossless `6.3116`，total `18.9347`，cache_hit `30`
+- `128`：decode `6.2745`，lossless `1.0000`，total `3.0000`，cache_hit `0`
+- `512`：decode `6.3484`，lossless `4.1113`，total `12.3338`，cache_hit `13`
 
 ### 5.2 runtime（近期稳定样例）
 
@@ -138,13 +151,12 @@
 
 ## 7. 当前未完成项 / 风险
 
-1. 虽然已加入跨层全局 decode cache，但“命中率提升”还未用最新代码回归验证。  
-2. `store` 模式在部分场景下解压开销仍可能偏高（需继续看 `runtime_decomp_us`）。  
+1. `store` 模式在部分场景下解压开销仍可能偏高（需继续看 `runtime_decomp_us`）。  
+2. 当前 decode cache 命中已提升，但主要出现在较长/高压缩桶；短桶命中仍可能为 `0`。  
 3. 吞吐门禁仍受机器时段波动影响，固定 baseline 在边界场景可能误报。
 
 ## 8. 下一步建议（按优先级）
 
-1. 用新代码先跑一轮 `2048-only llm_demo`，核验 `decode_cache_hit` 是否显著高于 0。  
+1. 跑一轮 `2048-only llm_demo` 固化长 prompt 指标（吞吐、decomp、cache hit）。  
 2. 再跑最小 runtime full/store 各一轮，确认新增全局 cache 没有引入吞吐回退。  
-3. 若命中仍低，再做第二轮 key 策略优化（内容指纹优先、弱位置匹配细化）。
-
+3. 若命中在长桶仍不稳定，再做第二轮 key 策略优化（内容指纹优先、弱位置匹配细化）。

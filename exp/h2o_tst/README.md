@@ -22,6 +22,36 @@ bash exp/h2o_tst/test_h2o_tst.sh
 - `exp/h2o_tst/out_YYYYmmdd_HHMMSS/cases.jsonl`
 - 各 case 子目录与控制台日志保留在同一输出目录下。
 
+## 最近验证结果（2026-02-18）
+
+来源：`exp/h2o_tst/out_20260218_211518/llm_demo/candidate`
+
+本轮参数：
+
+- `prompt_pattern=prompt_*.txt`
+- `sample_mode=stratified`
+- `max_prompts=0`
+- `max_prompts_per_bucket=1`
+- `bucket_order=['2048','128','512']`
+- `decode_tokens=512`
+
+本轮结果：
+
+- `overall_pass=true`，`pass_runs=3/3`
+- `decode_tps_avg=6.2277`（min `6.0602` / max `6.3484`）
+- `h2o_keep_ratio_avg=0.3333`
+- `h2o_lossy_ratio_avg=3.0000`
+- `h2o_lossless_ratio_avg=3.8076`
+- `h2o_runtime_total_ratio_avg=11.4228`
+- `runtime_decomp_us_max=17301`
+- `decode_cache_hit_max=30`
+
+分桶：
+
+- `2048`：decode `6.0602`，lossless `6.3116`，cache_hit `30`
+- `128`：decode `6.2745`，lossless `1.0000`，cache_hit `0`
+- `512`：decode `6.3484`，lossless `4.1113`，cache_hit `13`
+
 ## 常用环境变量
 
 - 运行开关：
