@@ -454,7 +454,13 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
     if (meta == nullptr) {
         return;
     }
-    const size_t baseSeqLen = meta->previous + meta->add;
+    // NOTE:
+    // KVMeta::previous is shared across all attention layers in one forward,
+    // while each CPUKVCacheManager instance owns a per-layer mPastLength.
+    // Under H2O per-layer compaction, mPastLength can temporarily diverge from
+    // shared previous. Realloc safety checks and target length should always
+    // use the per-layer real length.
+    const size_t baseSeqLen = static_cast<size_t>(ALIMAX(0, mPastLength)) + meta->add;
     if (meta->remove > baseSeqLen) {
         MNN_ERROR("Invalid KV realloc meta: remove=%zu exceeds previous+add=%zu, clamp.\n",
                   meta->remove, baseSeqLen);

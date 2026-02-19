@@ -1619,7 +1619,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             mKVCacheManager->onClear();
             mKVCacheManager->onAlloc(mMeta, seqLen);
         } else {
-            MNN_ASSERT(mMeta->previous == mKVCacheManager->kvLength());
+            const size_t kvLen = static_cast<size_t>(ALIMAX(0, mKVCacheManager->kvLength()));
+            if (mMeta->previous != kvLen) {
+                MNN_ERROR("KV length/meta previous mismatch before realloc: meta_previous=%zu kv_len=%zu.\n",
+                          mMeta->previous,
+                          kvLen);
+            }
             mKVCacheManager->onRealloc(mMeta);
         }
         insertLen = (int)mMeta->add;
