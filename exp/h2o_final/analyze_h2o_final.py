@@ -54,6 +54,42 @@ def format_gate_bool(v):
     return "true" if v else "false"
 
 
+def scan_invalid_kv_logs(paths):
+    patterns = [
+        re.compile(r"Invalid KV realloc", re.IGNORECASE),
+        re.compile(r"Invalid KV reserve range", re.IGNORECASE),
+        re.compile(r"KV length/meta previous mismatch", re.IGNORECASE),
+        re.compile(r"Drop stale per-layer pending plan", re.IGNORECASE),
+        re.compile(r"corrupted size", re.IGNORECASE),
+        re.compile(r"double free", re.IGNORECASE),
+        re.compile(r"Segmentation fault", re.IGNORECASE),
+        re.compile(r"munmap_chunk", re.IGNORECASE),
+    ]
+    hit_count = 0
+    examples = []
+    seen = set()
+    for raw_path in paths:
+        p = Path(raw_path)
+        candidates = sorted(p.glob("*.log")) if p.is_dir() else [p]
+        for cand in candidates:
+            if not cand.exists():
+                continue
+            key = cand.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            with cand.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    if any(pat.search(text) for pat in patterns):
+                        hit_count += 1
+                        if len(examples) < 5:
+                            examples.append(f"{cand}: {text[:220]}")
+    return hit_count, examples
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze parsed H2O final CSV metrics.")
     parser.add_argument("--csv", required=True)
@@ -84,6 +120,39 @@ def main():
         help="Optional sample count used to derive decode baseline.",
     )
     parser.add_argument("--decode-drop-target", type=float, default=0.05, help="Max allowed decode TPS drop ratio.")
+    parser.add_argument(
+        "--runtime-mode",
+        default="",
+        choices=["", "probe", "full", "store"],
+        help="Runtime mode for consistency checks.",
+    )
+    parser.add_argument(
+        "--async-threads",
+        type=int,
+        default=0,
+        help="Configured async worker count for consistency checks.",
+    )
+    parser.add_argument(
+        "--require-kv-content-consistency",
+        action="store_true",
+        help="Enable strict KV content consistency gate (restore/fallback/log integrity).",
+    )
+    parser.add_argument(
+        "--max-kv-invalid-log-lines",
+        type=int,
+        default=0,
+        help="Allowed number of invalid-KV integrity lines in logs when consistency gate is enabled.",
+    )
+    parser.add_argument(
+        "--bench-stdout-log",
+        default="",
+        help="Optional llm_bench stdout log for integrity scan.",
+    )
+    parser.add_argument(
+        "--logs-dir",
+        default="",
+        help="Optional llm_bench markdown log dir for integrity scan.",
+    )
     parser.add_argument(
         "--max-lossless-queue-peak",
         type=float,
@@ -190,6 +259,7 @@ def main():
             row["_h2o_lossless_async_wait_us"] = parse_float(row.get("h2o_lossless_async_wait_us", "0"))
             row["_h2o_lossless_decode_cache_hit"] = parse_float(row.get("h2o_lossless_decode_cache_hit", "0"))
             row["_h2o_lossless_decode_cache_miss"] = parse_float(row.get("h2o_lossless_decode_cache_miss", "0"))
+            row["_h2o_lossless_decompressed_bytes"] = parse_float(row.get("h2o_lossless_decompressed_bytes", "0"))
             row["_decode_tps"] = parse_decode_speed(row.get("speed(tok/s)", ""))
             rows.append(row)
 
@@ -287,6 +357,8 @@ def main():
         (r["_h2o_lossless_decode_cache_hit"] + r["_h2o_lossless_decode_cache_miss"])
         for r in rows
     )
+    runtime_decompressed_bytes_best = max(r["_h2o_lossless_decompressed_bytes"] for r in rows)
+    runtime_decompressed_bytes_available = "h2o_lossless_decompressed_bytes" in csv_fieldnames
     runtime_decomp_required_pass = (runtime_decomp_best > 0.0) if args.require_runtime_decomp else True
     runtime_decode_cache_required_pass = (
         runtime_decode_cache_hit_best > 0.0
@@ -340,6 +412,34 @@ def main():
     if args.decode_baseline > 0.0:
         decode_drop_ratio = (args.decode_baseline - decode_gate_tps) / args.decode_baseline
         decode_pass = decode_drop_ratio <= args.decode_drop_target
+
+    log_scan_paths = []
+    if args.bench_stdout_log:
+        log_scan_paths.append(args.bench_stdout_log)
+    if args.logs_dir:
+        log_scan_paths.append(args.logs_dir)
+    kv_invalid_log_count, kv_invalid_log_examples = scan_invalid_kv_logs(log_scan_paths)
+    kv_invalid_log_pass = kv_invalid_log_count <= max(0, args.max_kv_invalid_log_lines)
+    kv_async_activity_required = args.async_threads > 0 and args.runtime_mode != "probe"
+    kv_async_activity_pass = (
+        (runtime_async_queue_peak_best > 0.0) or (runtime_async_wait_best > 0.0)
+        if kv_async_activity_required
+        else True
+    )
+    kv_restore_required = args.runtime_mode in ("full", "store")
+    kv_restore_activity_pass = (
+        runtime_decomp_best > 0.0
+        and ((runtime_decompressed_bytes_best > 0.0) if runtime_decompressed_bytes_available else True)
+        if kv_restore_required
+        else True
+    )
+    kv_fallback_clean_pass = runtime_fallback_best <= 0.0
+    kv_content_consistency_pass = (
+        kv_invalid_log_pass
+        and kv_async_activity_pass
+        and kv_restore_activity_pass
+        and kv_fallback_clean_pass
+    ) if args.require_kv_content_consistency else True
     overall_pass = (
         lossy_pass
         and online_lossless_pass
@@ -353,6 +453,7 @@ def main():
         and runtime_queue_peak_pass
         and runtime_fallback_pass
         and runtime_backpressure_skip_pass
+        and kv_content_consistency_pass
     )
 
     out_path = Path(args.out)
@@ -498,6 +599,21 @@ def main():
             f"{format_gate_bool(runtime_backpressure_skip_pass)}\n"
         )
         f.write(f"- runtime_decomp_pass: {format_gate_bool(runtime_decomp_pass)}\n")
+        f.write(f"- require_kv_content_consistency: {format_gate_bool(args.require_kv_content_consistency)}\n")
+        f.write(f"- runtime_mode: {args.runtime_mode}\n")
+        f.write(f"- async_threads: {int(args.async_threads)}\n")
+        f.write(f"- runtime_decompressed_bytes_available: {format_gate_bool(runtime_decompressed_bytes_available)}\n")
+        f.write(f"- runtime_decompressed_bytes_best: {runtime_decompressed_bytes_best:.4f}\n")
+        f.write(f"- kv_restore_required: {format_gate_bool(kv_restore_required)}\n")
+        f.write(f"- kv_restore_activity_pass: {format_gate_bool(kv_restore_activity_pass)}\n")
+        f.write(f"- kv_fallback_clean_pass: {format_gate_bool(kv_fallback_clean_pass)}\n")
+        f.write(f"- kv_async_activity_required: {format_gate_bool(kv_async_activity_required)}\n")
+        f.write(f"- kv_async_activity_pass: {format_gate_bool(kv_async_activity_pass)}\n")
+        f.write(f"- kv_invalid_log_count: {int(kv_invalid_log_count)}\n")
+        f.write(f"- kv_invalid_log_max_allowed: {int(max(0, args.max_kv_invalid_log_lines))}\n")
+        f.write(f"- kv_invalid_log_pass: {format_gate_bool(kv_invalid_log_pass)}\n")
+        f.write(f"- kv_invalid_log_examples: {kv_invalid_log_examples}\n")
+        f.write(f"- kv_content_consistency_pass: {format_gate_bool(kv_content_consistency_pass)}\n")
         f.write(f"- overall_pass: {format_gate_bool(overall_pass)}\n")
         f.write(f"- decode_gate_enabled: {format_gate_bool(decode_gate_enabled)}\n")
         f.write(f"- decode_aggregation: {args.decode_gate_aggregation}\n")

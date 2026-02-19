@@ -106,6 +106,10 @@ private:
         };
         struct AsyncTask {
             uint64_t taskId = 0;
+            int layerIndex = 0;
+            int startToken = 0;
+            int tokenCount = 0;
+            bool runtimeStoreMode = false;
             std::function<AsyncResult()> fn;
         };
         std::vector<LayerState> layerStates;

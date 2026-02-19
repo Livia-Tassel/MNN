@@ -150,6 +150,8 @@ def runtime_row(
         "runtime_backpressure_skip_best": parse_float(gate.get("runtime_backpressure_skip_best", 0.0)),
         "runtime_decode_cache_hit_best": parse_float(gate.get("runtime_decode_cache_hit_best", 0.0)),
         "runtime_decode_cache_miss_best": parse_float(gate.get("runtime_decode_cache_miss_best", 0.0)),
+        "kv_content_consistency_pass": gate.get("kv_content_consistency_pass", "").lower() == "true",
+        "kv_invalid_log_count": parse_float(gate.get("kv_invalid_log_count", 0.0)),
     }
 
 
@@ -263,6 +265,8 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
                 f"decomp_us={r['runtime_decomp_best_us']:.4f}, async_wait_us={r['runtime_async_wait_best_us']:.4f}, "
                 f"queue={r['runtime_queue_peak_best']:.4f}, fallback={r['runtime_fallback_best']:.4f}, "
                 f"cache_hit={r['runtime_decode_cache_hit_best']:.4f}, cache_miss={r['runtime_decode_cache_miss_best']:.4f}, "
+                f"kv_consistency={str(r.get('kv_content_consistency_pass', True)).lower()}, "
+                f"kv_invalid_logs={r.get('kv_invalid_log_count', 0.0):.0f}, "
                 f"summary=`{r['summary']}`{reason_seg}"
             )
         lines.append("")
@@ -332,6 +336,7 @@ def main() -> int:
         "REPEAT": str(env_int("REPEAT", 2)),
         "KV_LOSSLESS_ASYNC_THREADS": str(env_int("KV_LOSSLESS_ASYNC_THREADS", 2)),
         "KV_LOSSLESS_DECODE_CACHE_BLOCKS": str(env_int("KV_LOSSLESS_DECODE_CACHE_BLOCKS", 64)),
+        "KV_LOSSLESS_STRICT_ROUNDTRIP_CHECK": str(env_int("KV_LOSSLESS_STRICT_ROUNDTRIP_CHECK", 1)),
         "DECODE_BASELINE_MODE": env_str("DECODE_BASELINE_MODE", "same_batch"),
         "DECODE_BASELINE": f"{env_float('DECODE_BASELINE', 6.60):.6f}",
         "DECODE_DROP_TARGET": f"{env_float('DECODE_DROP_TARGET', 0.05):.6f}",
@@ -342,6 +347,8 @@ def main() -> int:
         "REQUIRE_DECODE_CACHE_HIT": str(env_int("REQUIRE_DECODE_CACHE_HIT", 0)),
         "REQUIRE_ASYNC_QUEUE_ACTIVITY": str(env_int("REQUIRE_ASYNC_QUEUE_ACTIVITY", 0)),
         "REQUIRE_DECODE_CACHE_ACTIVITY": str(env_int("REQUIRE_DECODE_CACHE_ACTIVITY", 0)),
+        "REQUIRE_KV_CONTENT_CONSISTENCY": str(env_int("REQUIRE_KV_CONTENT_CONSISTENCY", -1)),
+        "MAX_KV_INVALID_LOG_LINES": str(env_int("MAX_KV_INVALID_LOG_LINES", 0)),
     }
 
     baseline_extra = {

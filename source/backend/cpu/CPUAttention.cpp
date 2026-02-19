@@ -1712,6 +1712,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
 
                     CPUAttention::H2OSharedState::AsyncResult result;
                     result.taskId = task.taskId;
+                    result.layerIndex = task.layerIndex;
+                    result.startToken = task.startToken;
+                    result.tokenCount = task.tokenCount;
+                    result.runtimeStoreMode = task.runtimeStoreMode;
                     if (task.fn) {
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
                         try {
@@ -3413,13 +3417,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             : (evalStartToken + evalTokenCount);
                         layerState.losslessLastStep = losslessStep;
 
-                        CPUAttention::H2OSharedState::AsyncTask task;
-                        {
-                            std::lock_guard<std::mutex> lock(mH2OState->asyncMutex);
-                            task.taskId = ++mH2OState->asyncTaskSerial;
-                        }
-                        auto payloadForAsync = std::make_shared<LosslessCollectPayload>(std::move(payload));
-                        const int bytes = mBytes;
+	                        CPUAttention::H2OSharedState::AsyncTask task;
+	                        {
+	                            std::lock_guard<std::mutex> lock(mH2OState->asyncMutex);
+	                            task.taskId = ++mH2OState->asyncTaskSerial;
+	                        }
+	                        task.layerIndex = layerIndex;
+	                        task.startToken = evalStartToken;
+	                        task.tokenCount = evalTokenCount;
+	                        task.runtimeStoreMode = runtimeStoreModeLocal;
+	                        auto payloadForAsync = std::make_shared<LosslessCollectPayload>(std::move(payload));
+	                        const int bytes = mBytes;
                         task.fn = [payloadForAsync, layerIndex, runtimeStoreModeLocal, bytes, keyFlags, valueFlags]() mutable {
                             auto& payload = *payloadForAsync;
                             CPUAttention::H2OSharedState::AsyncResult asyncStats;

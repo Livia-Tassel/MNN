@@ -167,7 +167,7 @@ static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const
     meta->h2o_lossless_codec_runtime = cfg->kv_lossless_codec_runtime();
     meta->h2o_lossless_predictors_k = cfg->kv_lossless_predictors_k();
     meta->h2o_lossless_predictors_v = cfg->kv_lossless_predictors_v();
-    meta->h2o_lossless_async_threads = ALIMAX(1, cfg->kv_lossless_async_threads());
+    meta->h2o_lossless_async_threads = ALIMAX(0, cfg->kv_lossless_async_threads());
     meta->h2o_lossless_max_queue = ALIMAX(1, cfg->kv_lossless_max_queue());
     meta->h2o_lossless_decode_cache_blocks = ALIMAX(0, cfg->kv_lossless_decode_cache_blocks());
     meta->h2o_lossless_strict_roundtrip_check = cfg->kv_lossless_strict_roundtrip_check() ? 1 : 0;
