@@ -313,7 +313,6 @@ def main():
         files = load_prompt_files_from_manifest(Path(args.prompt_manifest), prompt_dir)
         if args.prompt_pattern:
             files = [f for f in files if fnmatch.fnmatch(f.name, args.prompt_pattern)]
-        files = sorted(files)
     else:
         files = sorted(prompt_dir.glob(args.prompt_pattern))
 

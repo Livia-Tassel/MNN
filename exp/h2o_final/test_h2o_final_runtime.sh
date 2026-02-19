@@ -643,12 +643,12 @@ if [[ "${DISABLE_H2O}" -eq 0 && "${DISABLE_LOSSLESS}" -eq 0 ]]; then
     echo "  Checked: ${OUT}/logs and ${BENCH_STDOUT_LOG}"
     exit 1
   fi
-  echo "  Sample lines:"
-  echo "${LOSSLESS_LINES}" | head -3
-
-  set +e
   STEP5_TMP="${TMPDIR}/step5_lossless_lines.txt"
   printf "%s\n" "${LOSSLESS_LINES}" > "${STEP5_TMP}"
+  echo "  Sample lines:"
+  head -3 "${STEP5_TMP}"
+
+  set +e
   STEP5_OUT=$(python3 - \
     "${KV_LOSSLESS_BLOCK_TOKENS}" \
     "${KV_LOSSLESS_RUNTIME_MODE}" \

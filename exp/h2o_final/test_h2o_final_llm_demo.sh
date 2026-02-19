@@ -269,8 +269,9 @@ candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
 
 baseline_decode = float(baseline.get("decode_tps_avg", 0.0))
 candidate_decode = float(candidate.get("decode_tps_avg", 0.0))
-decode_drop_ratio = 0.0
-if baseline_decode > 0:
+decode_gate_enabled = baseline_decode > 0.0
+decode_drop_ratio = 1.0
+if decode_gate_enabled:
     decode_drop_ratio = (baseline_decode - candidate_decode) / baseline_decode
 
 baseline_keep_ratio_avg = float(baseline.get("h2o_keep_ratio_avg", 0.0))
@@ -282,7 +283,7 @@ candidate_lossy_ratio_avg = float(candidate.get("h2o_lossy_ratio_avg", 0.0))
 candidate_lossless_ratio_avg = float(candidate.get("h2o_lossless_ratio_avg", 0.0))
 candidate_total_ratio_avg = float(candidate.get("h2o_runtime_total_ratio_avg", 0.0))
 
-decode_pass = decode_drop_ratio <= decode_drop_target
+decode_pass = decode_gate_enabled and (decode_drop_ratio <= decode_drop_target)
 runtime_decomp_best = float(candidate.get("runtime_decomp_us_max", 0.0))
 runtime_decomp_pass = (runtime_decomp_best > 0.0) if require_runtime_decomp else True
 decode_cache_hit_best = float(candidate.get("decode_cache_hit_max", 0.0))
@@ -309,10 +310,14 @@ for bucket in bucket_order:
     c_runs = int(c_stats.get("total_runs", 0))
     drop = 0.0
     decode_gate = True
-    gate_enabled = b_decode > 0.0 and b_runs > 0 and c_runs > 0
-    if gate_enabled:
-        drop = (b_decode - c_decode) / b_decode
-        decode_gate = drop <= decode_drop_target
+    gate_enabled = b_runs > 0 and c_runs > 0 and b_decode > 0.0
+    if b_runs > 0 and c_runs > 0:
+        if b_decode > 0.0:
+            drop = (b_decode - c_decode) / b_decode
+            decode_gate = drop <= decode_drop_target
+        else:
+            drop = 1.0
+            decode_gate = False
         if not decode_gate:
             bucket_decode_failures.append(bucket)
     bucket_report[bucket] = {
@@ -348,6 +353,7 @@ report = {
     "candidate_decode_tps_avg": candidate_decode,
     "decode_drop_ratio": decode_drop_ratio,
     "decode_drop_target": decode_drop_target,
+    "decode_gate_enabled": decode_gate_enabled,
     "decode_pass": decode_pass,
     "baseline_keep_ratio_avg": baseline_keep_ratio_avg,
     "baseline_lossy_ratio_avg": baseline_lossy_ratio_avg,
@@ -382,6 +388,7 @@ lines.append(f"- baseline_decode_tps_avg: {baseline_decode:.4f}")
 lines.append(f"- candidate_decode_tps_avg: {candidate_decode:.4f}")
 lines.append(f"- decode_drop_ratio: {decode_drop_ratio:.6f}")
 lines.append(f"- decode_drop_target: {decode_drop_target:.6f}")
+lines.append(f"- decode_gate_enabled: {str(decode_gate_enabled).lower()}")
 lines.append(f"- decode_pass: {str(decode_pass).lower()}")
 lines.append(f"- baseline_keep_ratio_avg: {baseline_keep_ratio_avg:.4f}")
 lines.append(f"- baseline_lossy_ratio_avg: {baseline_lossy_ratio_avg:.4f}")

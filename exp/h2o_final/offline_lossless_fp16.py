@@ -813,14 +813,14 @@ def main():
 
         for _, entries in groups.items():
             entries.sort(key=lambda x: (int(x["seq_start"]), int(x["order_idx"])))
-            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
-            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
             try:
                 k_comp, k_diag = compress_grouped_entries_chunked_fp16(entries, args, compressor, tensor_name="k")
                 v_comp, v_diag = compress_grouped_entries_chunked_fp16(entries, args, compressor, tensor_name="v")
             except Exception:
                 skip("compression_failed")
                 continue
+            k_raw_bytes += sum(len(e["k_fp16"]) for e in entries)
+            v_raw_bytes += sum(len(e["v_fp16"]) for e in entries)
             k_compressed_bytes += k_comp
             v_compressed_bytes += v_comp
             k_chunk_meta_bytes += int(k_diag.get("chunk_meta_bytes", 0))
