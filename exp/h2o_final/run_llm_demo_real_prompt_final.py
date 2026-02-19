@@ -350,9 +350,13 @@ def main():
         metrics_path = metrics_dir / f"{run_id}.jsonl"
         stdout_path = logs_dir / f"{run_id}.stdout.log"
         stderr_path = logs_dir / f"{run_id}.stderr.log"
+        tmp_run_dir = out_dir / "tmp" / run_id
+        tmp_run_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
         env["LLM_DEMO_METRICS_JSONL"] = str(metrics_path)
+        # Keep per-prompt process artifacts isolated (tmp/tuning/cache files).
+        env["LLM_DEMO_TMP_PATH"] = str(tmp_run_dir)
         cmd = [
             args.llm_demo,
             args.config,

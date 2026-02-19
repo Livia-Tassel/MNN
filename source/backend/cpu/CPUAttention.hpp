@@ -37,6 +37,10 @@ private:
     struct H2OSharedState {
         struct LayerState {
             struct LosslessBlock {
+                enum Origin : uint8_t {
+                    FROM_RAW_KV = 0,
+                    FROM_DROPPED_KV = 1,
+                };
                 int startToken = 0;
                 int tokenCount = 0;
                 uint64_t rawBytes = 0;
@@ -45,6 +49,7 @@ private:
                 uint64_t blobHash = 0;
                 bool decodedOnce = false;
                 bool rawDropped = false;
+                Origin origin = FROM_RAW_KV;
                 std::vector<uint8_t> keyBlob;
                 std::vector<uint8_t> valueBlob;
             };

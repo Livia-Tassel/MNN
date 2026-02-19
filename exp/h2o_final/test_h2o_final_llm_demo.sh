@@ -183,7 +183,7 @@ candidate.update({
     "kv_h2o_ema_alpha": getf("H2O_EMA_ALPHA", 0.9),
     "kv_h2o_update_interval": geti("H2O_UPDATE_INTERVAL", 16),
     "kv_h2o_trigger_min_tokens": geti("H2O_TRIGGER_MIN", 384),
-    "kv_h2o_log_stats": getb("H2O_LOG_STATS", True),
+    "kv_h2o_log_stats": getb("H2O_LOG_STATS", False),
     "kv_lossless_enable": True,
     "kv_lossless_scope": gets("KV_LOSSLESS_SCOPE", "front_n_and_h2o_kept"),
     "kv_lossless_front_n": geti("KV_LOSSLESS_FRONT_N", 2),

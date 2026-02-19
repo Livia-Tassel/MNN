@@ -2950,6 +2950,28 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     return;
                 }
                 auto& targetLayerState = mH2OState->layerStates[targetLayerIndex];
+                auto blockOrigin = CPUAttention::H2OSharedState::LayerState::LosslessBlock::FROM_RAW_KV;
+                bool countRatioStats = true;
+                if (runtimeStoreModeLocal && tokenCount > 0) {
+                    const int64_t rangeBegin = static_cast<int64_t>(startToken);
+                    const int64_t rangeEnd = rangeBegin + static_cast<int64_t>(tokenCount);
+                    for (const auto& existing : targetLayerState.losslessBlocks) {
+                        if (!existing.rawDropped) {
+                            continue;
+                        }
+                        const int64_t existingBegin = static_cast<int64_t>(existing.startToken);
+                        const int64_t existingEnd = existingBegin + static_cast<int64_t>(existing.tokenCount);
+                        const bool overlap = !(rangeEnd <= existingBegin || existingEnd <= rangeBegin);
+                        if (overlap) {
+                            blockOrigin = CPUAttention::H2OSharedState::LayerState::LosslessBlock::FROM_DROPPED_KV;
+                            // In store mode, once raw KV has been dropped for this range,
+                            // follow-up re-encodes are only for reuse and should not
+                            // inflate lossless ratio accounting.
+                            countRatioStats = false;
+                            break;
+                        }
+                    }
+                }
                 if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
                     const int maxLen = mKVCacheManager != nullptr ? mKVCacheManager->maxLength() : 0;
                     const int endToken = startToken + tokenCount;
@@ -2965,6 +2987,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     block.rawHash = stats.rawHash;
                     block.blobHash = stats.blobHash;
                     block.decodedOnce = runtimeStoreModeLocal;
+                    block.origin = blockOrigin;
                     block.keyBlob.swap(stats.keyBlob);
                     block.valueBlob.swap(stats.valueBlob);
                     if (block.blobHash == 0 && (!block.keyBlob.empty() || !block.valueBlob.empty())) {
@@ -3047,8 +3070,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 if (!runtimeStoreModeLocal) {
                     decodeOnePendingLosslessBlock(targetLayerState);
                 }
-                targetLayerState.losslessRawBytes += stats.rawBytes;
-                targetLayerState.losslessCompressedBytes += stats.compressedBytes;
+                if (countRatioStats) {
+                    targetLayerState.losslessRawBytes += stats.rawBytes;
+                    targetLayerState.losslessCompressedBytes += stats.compressedBytes;
+                }
                 targetLayerState.losslessDecompressedBytes += stats.decompressedBytes;
                 targetLayerState.losslessCompressUs += stats.compressUs;
                 targetLayerState.losslessDecompressUs += stats.decompressUs;

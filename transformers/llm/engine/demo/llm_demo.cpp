@@ -301,7 +301,13 @@ int main(int argc, const char* argv[]) {
     std::string config_path = argv[1];
     std::cout << "config path is " << config_path << std::endl;
     std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
-    llm->set_config("{\"tmp_path\":\"tmp\"}");
+    std::string tmp_path = "tmp";
+    if (const char* env_tmp_path = std::getenv("LLM_DEMO_TMP_PATH")) {
+        if (env_tmp_path[0] != '\0') {
+            tmp_path = env_tmp_path;
+        }
+    }
+    llm->set_config(std::string("{\"tmp_path\":\"") + tmp_path + "\"}");
     {
         AUTOTIME;
         bool res = llm->load();
