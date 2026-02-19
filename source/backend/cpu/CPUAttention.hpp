@@ -59,6 +59,12 @@ private:
                 std::vector<uint8_t> valueDecoded;
             };
             std::vector<float> blockScores;
+            // Per-layer pending compact plan for next decode step.
+            // Kept in layer-local storage to avoid cross-layer pointer aliasing.
+            size_t pendingRemove = 0;
+            std::vector<int> activeReservePairs;
+            std::vector<int> pendingReservePairs;
+            int pendingPlanReady = 0;
             int64_t losslessLastStep = 0;
             int losslessLastTokenBudget = 0;
             uint64_t losslessRawBytes = 0;

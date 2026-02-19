@@ -1512,66 +1512,60 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
 
     if (mKVCache && mMeta != nullptr) {
-        auto clearPendingPlan = [&]() {
-            if (mH2OState != nullptr) {
-                mH2OState->reserveStoragePending.clear();
-            }
-            mMeta->h2o_pending_plan_ready = 0;
-            mMeta->h2o_pending_remove = 0;
-            mMeta->h2o_pending_reserve = nullptr;
-            mMeta->h2o_pending_n_reserve = 0;
-        };
         const size_t kvLenBeforeRealloc = (size_t)ALIMAX(0, mKVCacheManager->kvLength());
-        if (mMeta->h2o_pending_plan_ready != 0
-            && mMeta->h2o_pending_remove != kvLenBeforeRealloc) {
-            MNN_ERROR("Drop stale pending plan: pending_remove=%zu != kv_len=%zu.\n",
-                      mMeta->h2o_pending_remove,
-                      kvLenBeforeRealloc);
-            clearPendingPlan();
-        }
-        // Apply previous-step H2O compact plan before touching KV cache in this step.
-        if (mMeta->h2o_pending_plan_ready != 0
-            && mMeta->remove == 0
-            && mMeta->n_reserve == 0
-            && mMeta->previous >= mMeta->h2o_pending_remove
-            && mMeta->h2o_pending_remove == kvLenBeforeRealloc) {
-            bool planApplied = false;
-            if (mH2OState != nullptr) {
-                const int pendingPairsMeta = ALIMAX(0, mMeta->h2o_pending_n_reserve);
-                const int pendingInts = (int)mH2OState->reserveStoragePending.size();
-                const int pendingPairsBuffer = pendingInts / 2;
-                if (pendingPairsMeta == 0) {
-                    mH2OState->reserveStorage.clear();
-                    mMeta->remove = mMeta->h2o_pending_remove;
-                    mMeta->reserve = nullptr;
-                    mMeta->n_reserve = 0;
-                    planApplied = true;
-                } else if (pendingInts == pendingPairsMeta * 2) {
-                    mH2OState->reserveStorage.swap(mH2OState->reserveStoragePending);
-                    mH2OState->reserveStoragePending.clear();
-                    mMeta->remove = mMeta->h2o_pending_remove;
-                    mMeta->reserve = mH2OState->reserveStorage.empty() ? nullptr : mH2OState->reserveStorage.data();
-                    mMeta->n_reserve = (int)mH2OState->reserveStorage.size() / 2;
-                    planApplied = true;
-                } else {
-                    MNN_ERROR("Invalid pending reserve plan: meta_pairs=%d buffer_pairs=%d (ints=%d). Drop pending plan.\n",
-                              pendingPairsMeta, pendingPairsBuffer, pendingInts);
-                    mH2OState->reserveStoragePending.clear();
-                    mH2OState->reserveStorage.clear();
+        // Apply previous-step H2O compact plan from per-layer storage.
+        // Using layer-local buffers avoids cross-layer raw-pointer aliasing.
+        if (mH2OState != nullptr
+            && preLayerIndex >= 0
+            && preLayerIndex < (int)mH2OState->layerStates.size()) {
+            auto& pendingState = mH2OState->layerStates[preLayerIndex];
+            if (pendingState.pendingPlanReady != 0) {
+                const size_t pendingRemove = pendingState.pendingRemove;
+                const int pendingInts = (int)pendingState.pendingReservePairs.size();
+                const int pendingPairs = pendingInts / 2;
+                bool validPending = ((pendingInts % 2) == 0)
+                    && (pendingRemove == kvLenBeforeRealloc);
+                if (validPending && pendingPairs > 0) {
+                    int64_t lastEnd = 0;
+                    for (int n = 0; n < pendingPairs; ++n) {
+                        const int begin = pendingState.pendingReservePairs[2 * n];
+                        const int size = pendingState.pendingReservePairs[2 * n + 1];
+                        const int64_t end = (int64_t)begin + (int64_t)size;
+                        if (begin < 0
+                            || size <= 0
+                            || end < (int64_t)begin
+                            || end > (int64_t)pendingRemove
+                            || (int64_t)begin < lastEnd) {
+                            validPending = false;
+                            break;
+                        }
+                        lastEnd = end;
+                    }
                 }
-            } else {
-                mMeta->remove = mMeta->h2o_pending_remove;
-                mMeta->reserve = mMeta->h2o_pending_reserve;
-                mMeta->n_reserve = mMeta->h2o_pending_n_reserve;
-                planApplied = true;
+                if (validPending && mMeta->remove == 0 && mMeta->n_reserve == 0) {
+                    pendingState.activeReservePairs.swap(pendingState.pendingReservePairs);
+                    mMeta->remove = pendingRemove;
+                    mMeta->reserve = pendingState.activeReservePairs.empty()
+                        ? nullptr
+                        : pendingState.activeReservePairs.data();
+                    mMeta->n_reserve = (int)pendingState.activeReservePairs.size() / 2;
+                } else if (!validPending) {
+                    MNN_ERROR("Drop stale per-layer pending plan: layer=%d pending_remove=%zu kv_len=%zu pending_ints=%d.\n",
+                              preLayerIndex,
+                              pendingRemove,
+                              kvLenBeforeRealloc,
+                              pendingInts);
+                }
+                pendingState.pendingPlanReady = 0;
+                pendingState.pendingRemove = 0;
+                pendingState.pendingReservePairs.clear();
             }
-            if (!planApplied) {
-                mMeta->remove = 0;
-                mMeta->reserve = nullptr;
-                mMeta->n_reserve = 0;
-            }
-            clearPendingPlan();
         }
+        // Do not carry raw pending pointers in shared meta across layers.
+        mMeta->h2o_pending_plan_ready = 0;
+        mMeta->h2o_pending_remove = 0;
+        mMeta->h2o_pending_reserve = nullptr;
+        mMeta->h2o_pending_n_reserve = 0;
         if (mMeta->remove > kvLenBeforeRealloc) {
             MNN_ERROR("Clamp invalid meta remove: remove=%zu > kv_len=%zu.\n",
                       mMeta->remove,
@@ -1814,6 +1808,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         }
         for (auto& state : mH2OState->layerStates) {
             state.blockScores.clear();
+            state.pendingRemove = 0;
+            state.pendingPlanReady = 0;
+            state.activeReservePairs.clear();
+            state.pendingReservePairs.clear();
             state.losslessLastStep = 0;
             state.losslessLastTokenBudget = 0;
             state.losslessRawBytes = 0;
@@ -2451,15 +2449,28 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int evictedTokens = ALIMAX(0, kvSeqLen - finalKeepTokens);
             const size_t reserveMetaBytes = (size_t)reservePairs.size() * sizeof(int);
 
-            if (evictedTokens > 0 && !reservePairs.empty()) {
-                mH2OState->reserveStoragePending.swap(reservePairs);
-                mMeta->h2o_pending_remove = kvSeqLen;
-                mMeta->h2o_pending_reserve = mH2OState->reserveStoragePending.empty()
-                    ? nullptr
-                    : mH2OState->reserveStoragePending.data();
-                mMeta->h2o_pending_n_reserve = (int)mH2OState->reserveStoragePending.size() / 2;
-                mMeta->h2o_pending_plan_ready = 1;
-                mMeta->h2o_total_evict_tokens += evictedTokens;
+            if (mH2OState != nullptr
+                && layerIndex >= 0
+                && layerIndex < (int)mH2OState->layerStates.size()) {
+                auto& pendingState = mH2OState->layerStates[layerIndex];
+                if (evictedTokens > 0 && !reservePairs.empty()) {
+                    pendingState.pendingReservePairs.swap(reservePairs);
+                    pendingState.pendingRemove = (size_t)kvSeqLen;
+                    pendingState.pendingPlanReady = 1;
+                    mMeta->h2o_pending_remove = pendingState.pendingRemove;
+                    mMeta->h2o_pending_reserve = nullptr;
+                    mMeta->h2o_pending_n_reserve = (int)pendingState.pendingReservePairs.size() / 2;
+                    mMeta->h2o_pending_plan_ready = 1;
+                    mMeta->h2o_total_evict_tokens += evictedTokens;
+                } else {
+                    pendingState.pendingPlanReady = 0;
+                    pendingState.pendingRemove = 0;
+                    pendingState.pendingReservePairs.clear();
+                    mMeta->h2o_pending_plan_ready = 0;
+                    mMeta->h2o_pending_remove = 0;
+                    mMeta->h2o_pending_reserve = nullptr;
+                    mMeta->h2o_pending_n_reserve = 0;
+                }
             }
 
             const size_t bytesPerToken = (size_t)mKvNumHead * (size_t)mHeadDim * (size_t)mBytes * 2;
@@ -3263,6 +3274,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 // while preserving accumulated byte/ratio stats for aggregation.
                 layerState.losslessLastStep = 0;
                 layerState.losslessLastTokenBudget = coldTokenBudget;
+                layerState.pendingRemove = 0;
+                layerState.pendingPlanReady = 0;
+                layerState.activeReservePairs.clear();
+                layerState.pendingReservePairs.clear();
                 layerState.losslessBlocks.clear();
                 layerState.decodeCacheEntries.clear();
             }
