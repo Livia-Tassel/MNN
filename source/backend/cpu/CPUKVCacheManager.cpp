@@ -459,6 +459,11 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         MNN_ERROR("Invalid KV realloc meta: remove=%zu exceeds previous+add=%zu, clamp.\n",
                   meta->remove, baseSeqLen);
         meta->remove = baseSeqLen;
+        // Reserve ranges are expressed against the removed window. Once remove
+        // is clamped, the original reserve plan no longer matches and must be
+        // dropped to avoid invalid move ranges.
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
     }
     int reserveSize = meta->computeReserveSize();
     if (reserveSize < 0) {

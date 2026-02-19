@@ -1512,6 +1512,15 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
 
     if (mKVCache && mMeta != nullptr) {
+        const bool h2oDecodeStep = (mMeta->h2o_enable != 0) && (mMeta->h2o_in_decode != 0);
+        if (h2oDecodeStep) {
+            // `remove/reserve` in KVMeta are shared across all layers in one forward.
+            // H2O pending compact plans are now per-layer, so clear any carry-over
+            // from the previous layer before applying this layer's pending plan.
+            mMeta->remove = 0;
+            mMeta->reserve = nullptr;
+            mMeta->n_reserve = 0;
+        }
         const size_t kvLenBeforeRealloc = (size_t)ALIMAX(0, mKVCacheManager->kvLength());
         // Apply previous-step H2O compact plan from per-layer storage.
         // Using layer-local buffers avoids cross-layer raw-pointer aliasing.
@@ -1542,7 +1551,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         lastEnd = end;
                     }
                 }
-                if (validPending && mMeta->remove == 0 && mMeta->n_reserve == 0) {
+                if (validPending) {
                     pendingState.activeReservePairs.swap(pendingState.pendingReservePairs);
                     mMeta->remove = pendingRemove;
                     mMeta->reserve = pendingState.activeReservePairs.empty()
