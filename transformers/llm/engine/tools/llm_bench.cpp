@@ -173,6 +173,7 @@ struct TestInstance {
     int                      nGenerate;
     std::vector<int64_t>     prefillUs;
     std::vector<int64_t>     decodeUs;
+    std::vector<int>         decodeTokensActual;
     std::vector<int64_t>     samplesUs;
     std::vector<double>      loadingS;
     std::vector<double>      h2oKeep;
@@ -223,6 +224,21 @@ struct TestInstance {
     std::vector<double> getTokensPerSecond(int n_tokens, std::vector<int64_t> cost_us) const {
         std::vector<double> ts;
         std::transform(cost_us.begin(), cost_us.end(), std::back_inserter(ts), [n_tokens](int64_t t) { return 1e6 * n_tokens / t; });
+        return ts;
+    }
+
+    std::vector<double> getTokensPerSecond(const std::vector<int>& tokens, const std::vector<int64_t>& cost_us, int fallback_tokens = 0) const {
+        std::vector<double> ts;
+        const size_t n = std::min(tokens.size(), cost_us.size());
+        ts.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            const int token_count = tokens[i] > 0 ? tokens[i] : fallback_tokens;
+            const int64_t t = cost_us[i];
+            if (token_count <= 0 || t <= 0) {
+                continue;
+            }
+            ts.emplace_back(1e6 * static_cast<double>(token_count) / static_cast<double>(t));
+        }
         return ts;
     }
 
@@ -448,6 +464,12 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "speed(tok/s)") {
                 auto decode_speed = t.getTokensPerSecond(t.nGenerate, t.decodeUs);
+                if (!t.decodeTokensActual.empty()) {
+                    auto decode_speed_actual = t.getTokensPerSecond(t.decodeTokensActual, t.decodeUs, t.nGenerate);
+                    if (!decode_speed_actual.empty()) {
+                        decode_speed = std::move(decode_speed_actual);
+                    }
+                }
                 auto prefill_speed = t.getTokensPerSecond(t.nPrompt, t.prefillUs);
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f<br>%.2f ± %.2f", t.getAvgUs(prefill_speed), t.getStdevUs(prefill_speed), t.getAvgUs(decode_speed), t.getStdevUs(decode_speed));
                 value = buf;
@@ -644,6 +666,12 @@ struct jsonAggregator : public Printer {
                 std::vector<double> speed;
                 if (!inst.decodeUs.empty()) {
                     speed = inst.getTokensPerSecond(inst.nGenerate, inst.decodeUs);
+                    if (!inst.decodeTokensActual.empty()) {
+                        auto speed_actual = inst.getTokensPerSecond(inst.decodeTokensActual, inst.decodeUs, inst.nGenerate);
+                        if (!speed_actual.empty()) {
+                            speed = std::move(speed_actual);
+                        }
+                    }
                 } else if (!inst.samplesUs.empty()) {
                     speed = inst.getTokensPerSecond(inst.nGenerate, inst.samplesUs);
                 }
@@ -673,6 +701,12 @@ struct jsonAggregator : public Printer {
                 }
                 if (!inst.decodeUs.empty()) {
                     auto decode_speed = inst.getTokensPerSecond(inst.nGenerate, inst.decodeUs);
+                    if (!inst.decodeTokensActual.empty()) {
+                        auto decode_speed_actual = inst.getTokensPerSecond(inst.decodeTokensActual, inst.decodeUs, inst.nGenerate);
+                        if (!decode_speed_actual.empty()) {
+                            decode_speed = std::move(decode_speed_actual);
+                        }
+                    }
                     writer.Key("decode_tps");
                     writer.Double(inst.getAvgUs(decode_speed));
                     writer.Key("decode_std");
@@ -1467,9 +1501,11 @@ int main(int argc, char ** argv) {
                 llm->response(tokens, nullptr, nullptr, decodeTokens);
                 auto prefillTime = context->prefill_us;
                 auto decodeTime = context->decode_us;
+                auto decodeGenerated = context->gen_seq_len;
                 if (i > 0) { // Exclude the first performance value.
                     t.prefillUs.push_back(prefillTime);
                     t.decodeUs.push_back(decodeTime);
+                    t.decodeTokensActual.push_back(decodeGenerated);
                     t.h2oKeep.push_back(context->h2o_keep_ratio);
                     t.h2oLossy.push_back(context->h2o_lossy_ratio);
                     t.h2oLossless.push_back(context->h2o_lossless_ratio);

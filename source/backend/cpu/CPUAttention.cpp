@@ -3268,14 +3268,28 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int coldEndToken = ALIMAX(coldBeginToken, losslessTokenBudget - hotRecentTokens);
             const int coldTokenBudget = coldEndToken;
             if (coldTokenBudget < layerState.losslessLastTokenBudget) {
-                // Consume one pending decode before a shrink-triggered clear so we do
-                // not silently drop undecoded runtime blocks.
-                decodeOnePendingLosslessBlock(layerState);
-                // Count remaining undecoded blocks that will be discarded by clear().
+                // Shrink can invalidate previously staged cold blocks.
+                // In full mode, decode as many pending blocks as possible before
+                // clear so fallback reflects real decode failures, not queue residue.
+                if (!runtimeStoreModeLocal) {
+                    const int64_t pendingBefore = countPendingBlocks(layerState);
+                    int64_t attempts = 0;
+                    while (attempts < pendingBefore && countPendingBlocks(layerState) > 0) {
+                        decodeOnePendingLosslessBlock(layerState);
+                        attempts += 1;
+                    }
+                }
+                // Count remaining pending blocks that will be discarded by clear().
                 const int64_t discardedUndecoded = countPendingBlocks(layerState);
                 if (discardedUndecoded > 0) {
-                    layerState.losslessFallbackCount += discardedUndecoded;
-                    MNN_PRINT("[H2O-LOSSLESS] shrink: discarding %lld undecoded blocks\n", (long long)discardedUndecoded);
+                    if (!runtimeStoreModeLocal) {
+                        layerState.losslessFallbackCount += discardedUndecoded;
+                        MNN_PRINT("[H2O-LOSSLESS] shrink: discarding %lld undecoded blocks\n", (long long)discardedUndecoded);
+                    } else {
+                        // Store mode uses dropped-raw compressed blocks as steady state.
+                        // Shrink cleanup is expected and should not be treated as fallback.
+                        MNN_PRINT("[H2O-LOSSLESS] shrink(store): discarding %lld staged blocks\n", (long long)discardedUndecoded);
+                    }
                 }
                 // Compressible cold budget shrank (eviction or hot-window shift).
                 // Reset cold-window watermark so delta tracking works going forward,
