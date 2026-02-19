@@ -529,12 +529,14 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
     // Remove
     int start = mPastLength - static_cast<int>(meta->remove);
     if (start < 0) {
-        MNN_ERROR("Invalid KV realloc start: past=%d remove=%zu, clamp remove to past length.\n",
+        MNN_ERROR("Invalid KV realloc start: past=%d remove=%zu, skip this realloc to preserve KV cache.\n",
                   mPastLength, meta->remove);
-        start = 0;
-        meta->remove = static_cast<size_t>(mPastLength);
+        // Metadata is inconsistent with current KV length. Do not mutate cache;
+        // drop this edit and keep existing KV state to avoid cascading corruption.
+        meta->remove = 0;
         meta->n_reserve = 0;
         meta->reserve = nullptr;
+        return;
     }
     if (0 == meta->n_reserve || meta->reserve == nullptr || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
         mPastLength = start;
@@ -556,9 +558,11 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
             || srcEnd64 > static_cast<int64_t>(mPastLength)
             || static_cast<int64_t>(begin) + static_cast<int64_t>(size) > removeBound64
             || srcIndex64 < lastSrcEnd) {
-            MNN_ERROR("Invalid KV reserve range[%d]: begin=%d size=%d start=%d past=%d remove=%zu. Fallback to tail-trim only.\n",
+            MNN_ERROR("Invalid KV reserve range[%d]: begin=%d size=%d start=%d past=%d remove=%zu. Skip this reserve move and keep KV unchanged.\n",
                       n, begin, size, start, mPastLength, meta->remove);
-            mPastLength = start;
+            meta->remove = 0;
+            meta->n_reserve = 0;
+            meta->reserve = nullptr;
             return;
         }
         const int srcIndex = static_cast<int>(srcIndex64);

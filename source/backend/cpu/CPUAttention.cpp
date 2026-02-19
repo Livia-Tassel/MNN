@@ -1512,11 +1512,29 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
 
     if (mKVCache && mMeta != nullptr) {
+        auto clearPendingPlan = [&]() {
+            if (mH2OState != nullptr) {
+                mH2OState->reserveStoragePending.clear();
+            }
+            mMeta->h2o_pending_plan_ready = 0;
+            mMeta->h2o_pending_remove = 0;
+            mMeta->h2o_pending_reserve = nullptr;
+            mMeta->h2o_pending_n_reserve = 0;
+        };
+        const size_t kvLenBeforeRealloc = (size_t)ALIMAX(0, mKVCacheManager->kvLength());
+        if (mMeta->h2o_pending_plan_ready != 0
+            && mMeta->h2o_pending_remove != kvLenBeforeRealloc) {
+            MNN_ERROR("Drop stale pending plan: pending_remove=%zu != kv_len=%zu.\n",
+                      mMeta->h2o_pending_remove,
+                      kvLenBeforeRealloc);
+            clearPendingPlan();
+        }
         // Apply previous-step H2O compact plan before touching KV cache in this step.
         if (mMeta->h2o_pending_plan_ready != 0
             && mMeta->remove == 0
             && mMeta->n_reserve == 0
-            && mMeta->previous >= mMeta->h2o_pending_remove) {
+            && mMeta->previous >= mMeta->h2o_pending_remove
+            && mMeta->h2o_pending_remove == kvLenBeforeRealloc) {
             bool planApplied = false;
             if (mH2OState != nullptr) {
                 const int pendingPairsMeta = ALIMAX(0, mMeta->h2o_pending_n_reserve);
@@ -1552,10 +1570,47 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 mMeta->reserve = nullptr;
                 mMeta->n_reserve = 0;
             }
-            mMeta->h2o_pending_plan_ready = 0;
-            mMeta->h2o_pending_remove = 0;
-            mMeta->h2o_pending_reserve = nullptr;
-            mMeta->h2o_pending_n_reserve = 0;
+            clearPendingPlan();
+        }
+        if (mMeta->remove > kvLenBeforeRealloc) {
+            MNN_ERROR("Clamp invalid meta remove: remove=%zu > kv_len=%zu.\n",
+                      mMeta->remove,
+                      kvLenBeforeRealloc);
+            mMeta->remove = kvLenBeforeRealloc;
+            mMeta->reserve = nullptr;
+            mMeta->n_reserve = 0;
+        }
+        if (mMeta->n_reserve < 0) {
+            MNN_ERROR("Clamp invalid meta n_reserve=%d to 0.\n", mMeta->n_reserve);
+            mMeta->n_reserve = 0;
+            mMeta->reserve = nullptr;
+        }
+        if (mMeta->n_reserve > 0) {
+            bool validReserve = (mMeta->reserve != nullptr) && (mMeta->remove > 0);
+            int64_t lastEnd = 0;
+            if (validReserve) {
+                for (int n = 0; n < mMeta->n_reserve; ++n) {
+                    const int begin = mMeta->reserve[2 * n];
+                    const int size = mMeta->reserve[2 * n + 1];
+                    const int64_t end = static_cast<int64_t>(begin) + static_cast<int64_t>(size);
+                    if (begin < 0
+                        || size <= 0
+                        || end < static_cast<int64_t>(begin)
+                        || end > static_cast<int64_t>(mMeta->remove)
+                        || static_cast<int64_t>(begin) < lastEnd) {
+                        validReserve = false;
+                        break;
+                    }
+                    lastEnd = end;
+                }
+            }
+            if (!validReserve) {
+                MNN_ERROR("Drop invalid meta reserve before realloc: remove=%zu n_reserve=%d.\n",
+                          mMeta->remove,
+                          mMeta->n_reserve);
+                mMeta->reserve = nullptr;
+                mMeta->n_reserve = 0;
+            }
         }
         if (mMeta->previous == mMeta->remove && mMeta->n_reserve == 0) {
             mKVCacheManager->onClear();

@@ -351,11 +351,13 @@ def main() -> int:
         "STRICT_RUNTIME_METRIC_COLUMNS": str(env_int("BASELINE_STRICT_RUNTIME_METRIC_COLUMNS", 0)),
     }
     probe_extra = {
+        "H2O_TARGET_LOSSY_RATIO": f"{env_float('PROBE_H2O_TARGET_LOSSY_RATIO', 3.3):.6f}",
         "REQUIRE_RUNTIME_DECOMP": "0",
         "MAX_LOSSLESS_DECOMP_US": str(env_int("PROBE_MAX_LOSSLESS_DECOMP_US", -1)),
         "MAX_LOSSLESS_ASYNC_WAIT_US": str(env_int("PROBE_MAX_LOSSLESS_ASYNC_WAIT_US", 20000)),
     }
     full_extra = {
+        "H2O_TARGET_LOSSY_RATIO": f"{env_float('FULL_H2O_TARGET_LOSSY_RATIO', 3.3):.6f}",
         "REQUIRE_RUNTIME_DECOMP": "1",
         "MAX_LOSSLESS_DECOMP_US": str(env_int("FULL_MAX_LOSSLESS_DECOMP_US", 30000)),
         "MAX_LOSSLESS_ASYNC_WAIT_US": str(env_int("FULL_MAX_LOSSLESS_ASYNC_WAIT_US", 20000)),
