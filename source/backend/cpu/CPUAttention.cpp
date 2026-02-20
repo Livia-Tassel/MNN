@@ -1181,6 +1181,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         // Keep existing per-layer stats when a transient op reports smaller layer_count.
         // Only grow capacity; never shrink during an active run.
         mH2OState->layerStates.resize(layerCount);
+        mH2OState->layerCacheManagers.resize(layerCount, nullptr);
     }
     const int preLayerCount = layerCount;
     int preLayerIndex = 0;
@@ -1504,6 +1505,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     restoreState.losslessDecompressedBytes += chunk.decodedBytes;
                 } else {
                     restoreState.losslessFallbackCount += 1;
+                    MNN_ERROR("[H2O-LOSSLESS] scatter restore failed: layer=%d start=%d tokens=%d active_kv=%d max_kv=%d\n",
+                              preLayerIndex,
+                              chunk.startToken,
+                              chunk.tokenCount,
+                              mKVCacheManager != nullptr ? mKVCacheManager->kvLength() : -1,
+                              mKVCacheManager != nullptr ? mKVCacheManager->maxLength() : -1);
                 }
             }
         }
@@ -1842,6 +1849,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         mMeta->h2o_pending_remove = 0;
         mMeta->h2o_pending_reserve = nullptr;
         mMeta->h2o_pending_n_reserve = 0;
+    }
+    if (mH2OState != nullptr) {
+        if ((int)mH2OState->layerCacheManagers.size() < layerCount) {
+            mH2OState->layerCacheManagers.resize(layerCount, nullptr);
+        }
+        if (layerIndex >= 0 && layerIndex < (int)mH2OState->layerCacheManagers.size()) {
+            mH2OState->layerCacheManagers[layerIndex] = mKVCacheManager.get();
+        }
     }
     int h2oLayerStart = 0;
     int h2oLayerEnd = layerCount - 1;
@@ -2323,6 +2338,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
         // does not expose per-layer execution boundaries.
         if (mH2OState->layerStates.empty()) {
             mH2OState->layerStates.resize(1);
+            mH2OState->layerCacheManagers.resize(1, nullptr);
         }
         scoreStatePtr = &mH2OState->layerStates[0];
     }
@@ -2950,6 +2966,18 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     return;
                 }
                 auto& targetLayerState = mH2OState->layerStates[targetLayerIndex];
+                CPUKVCacheManager* targetCacheManager = nullptr;
+                if (targetLayerIndex >= 0
+                    && targetLayerIndex < (int)mH2OState->layerCacheManagers.size()) {
+                    targetCacheManager = mH2OState->layerCacheManagers[targetLayerIndex];
+                }
+                if (targetCacheManager == nullptr) {
+                    targetLayerState.losslessFallbackCount += 1;
+                    MNN_ERROR("[H2O-LOSSLESS] missing target KV cache manager: target_layer=%d current_layer=%d\n",
+                              targetLayerIndex, layerIndex);
+                    return;
+                }
+                const int targetFlashBlockKv = ALIMAX(1, (int)targetCacheManager->getFlashAttentionBlockKv());
                 auto blockOrigin = CPUAttention::H2OSharedState::LayerState::LosslessBlock::FROM_RAW_KV;
                 bool countRatioStats = true;
                 if (runtimeStoreModeLocal && tokenCount > 0) {
@@ -2973,10 +3001,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                     }
                 }
                 if (!stats.fallbackUsed && (!stats.keyBlob.empty() || !stats.valueBlob.empty())) {
-                    const int maxLen = mKVCacheManager != nullptr ? mKVCacheManager->maxLength() : 0;
+                    const int maxLen = targetCacheManager->maxLength();
                     const int endToken = startToken + tokenCount;
                     if (startToken < 0 || tokenCount <= 0 || endToken < startToken || endToken > maxLen) {
                         targetLayerState.losslessFallbackCount += 1;
+                        MNN_ERROR("[H2O-LOSSLESS] invalid encoded range: target_layer=%d current_layer=%d start=%d tokens=%d end=%d max=%d\n",
+                                  targetLayerIndex, layerIndex, startToken, tokenCount, endToken, maxLen);
                         return;
                     }
                     CPUAttention::H2OSharedState::LayerState::LosslessBlock block;
@@ -3008,13 +3038,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                             std::vector<uint8_t> seededKey;
                             std::vector<uint8_t> seededValue;
                             const bool seededOk = collectKvMergedRange(
-                                mKVCacheManager.get(),
+                                targetCacheManager,
                                 mKvNumHead,
                                 mHeadDim,
                                 mBytes,
                                 lP,
                                 hP,
-                                ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
+                                targetFlashBlockKv,
                                 stored.startToken,
                                 stored.tokenCount,
                                 seededKey,
@@ -3052,18 +3082,25 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                                 }
                             }
                         }
-                        if (zeroKvRange(mKVCacheManager.get(),
+                        if (zeroKvRange(targetCacheManager,
                                         mKvNumHead,
                                         mHeadDim,
                                         mBytes,
                                         lP,
                                         hP,
-                                        ALIMAX(1, (int)mKVCacheManager->getFlashAttentionBlockKv()),
+                                        targetFlashBlockKv,
                                         stored.startToken,
                                         stored.tokenCount)) {
                             stored.rawDropped = true;
                         } else {
                             targetLayerState.losslessFallbackCount += 1;
+                            MNN_ERROR("[H2O-LOSSLESS] zeroKvRange failed: target_layer=%d current_layer=%d start=%d tokens=%d kv_len=%d max_len=%d\n",
+                                      targetLayerIndex,
+                                      layerIndex,
+                                      stored.startToken,
+                                      stored.tokenCount,
+                                      targetCacheManager->kvLength(),
+                                      targetCacheManager->maxLength());
                         }
                     }
                 }

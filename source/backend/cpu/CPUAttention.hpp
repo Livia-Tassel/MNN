@@ -113,6 +113,9 @@ private:
             std::function<AsyncResult()> fn;
         };
         std::vector<LayerState> layerStates;
+        // Per-layer KV cache manager bindings (registered lazily in onExecute).
+        // Required when async results are applied for a different target layer.
+        std::vector<CPUKVCacheManager*> layerCacheManagers;
         // reserveStorage: active compact plan used by meta->reserve in current step.
         // reserveStoragePending: next-step plan generated during this step.
         std::vector<int> reserveStorage;
