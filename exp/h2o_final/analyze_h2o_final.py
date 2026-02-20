@@ -184,6 +184,15 @@ def main():
         help="Optional gate: require runtime async wait us <= target (negative disables).",
     )
     parser.add_argument(
+        "--async-wait-headroom-warn-ratio",
+        type=float,
+        default=0.15,
+        help=(
+            "Warn when async-wait headroom ratio (target-best)/target is below this threshold. "
+            "Negative disables warning."
+        ),
+    )
+    parser.add_argument(
         "--require-runtime-decomp",
         action="store_true",
         help="Require runtime h2o_lossless_decomp_us > 0 for at least one row.",
@@ -388,6 +397,24 @@ def main():
         if async_wait_gate_enabled
         else True
     )
+    runtime_async_wait_headroom_us = 0.0
+    runtime_async_wait_headroom_ratio = 1.0
+    runtime_async_wait_headroom_warn = False
+    if async_wait_gate_enabled and args.max_lossless_async_wait_us > 0.0:
+        runtime_async_wait_headroom_us = args.max_lossless_async_wait_us - runtime_async_wait_best
+        runtime_async_wait_headroom_ratio = runtime_async_wait_headroom_us / args.max_lossless_async_wait_us
+        if (
+            args.async_wait_headroom_warn_ratio >= 0.0
+            and runtime_async_wait_pass
+            and runtime_async_wait_headroom_ratio < args.async_wait_headroom_warn_ratio
+        ):
+            runtime_async_wait_headroom_warn = True
+            print(
+                "[WARN] runtime async wait headroom is low: "
+                f"best={runtime_async_wait_best:.2f}us target={args.max_lossless_async_wait_us:.2f}us "
+                f"headroom={runtime_async_wait_headroom_us:.2f}us "
+                f"ratio={runtime_async_wait_headroom_ratio:.4f}"
+            )
     queue_peak_gate_enabled = args.max_lossless_queue_peak >= 0.0
     fallback_gate_enabled = args.max_lossless_fallback >= 0.0
     backpressure_skip_gate_enabled = args.max_lossless_backpressure_skip >= 0.0
@@ -554,6 +581,16 @@ def main():
         f.write(f"- runtime_async_wait_gate_enabled: {format_gate_bool(async_wait_gate_enabled)}\n")
         if async_wait_gate_enabled:
             f.write(f"- runtime_async_wait_target_us: {args.max_lossless_async_wait_us:.4f}\n")
+            f.write(f"- runtime_async_wait_headroom_us: {runtime_async_wait_headroom_us:.4f}\n")
+            f.write(f"- runtime_async_wait_headroom_ratio: {runtime_async_wait_headroom_ratio:.6f}\n")
+            f.write(
+                f"- runtime_async_wait_headroom_warn_ratio: "
+                f"{args.async_wait_headroom_warn_ratio:.6f}\n"
+            )
+            f.write(
+                f"- runtime_async_wait_headroom_warn: "
+                f"{format_gate_bool(runtime_async_wait_headroom_warn)}\n"
+            )
         f.write(f"- runtime_decode_cache_hit_best: {runtime_decode_cache_hit_best:.4f}\n")
         f.write(f"- runtime_decode_cache_miss_best: {runtime_decode_cache_miss_best:.4f}\n")
         f.write(f"- runtime_decode_cache_activity_best: {runtime_decode_cache_activity_best:.4f}\n")

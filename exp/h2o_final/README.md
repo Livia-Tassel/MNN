@@ -68,7 +68,9 @@ bash exp/h2o_final/test_h2o_final.sh \
 - `DECODE_TOKENS=512`
 - `KV_LOSSLESS_ASYNC_THREADS=2`
 - `KV_LOSSLESS_DECODE_CACHE_BLOCKS=64`
+- store 默认分组：`KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS=32`、`KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS=256`
 - runtime decode 基线模式：`DECODE_BASELINE_MODE=same_batch`
+- llm_demo 默认运行顺序：`LLM_DEMO_RUN_ORDER=baseline_first`
 
 ## 输出目录
 
@@ -110,3 +112,6 @@ bash exp/h2o_final/test_h2o_final.sh \
   - `LLM_DEMO_DECODE_DROP_TARGET`
   - `REQUIRE_DECODE_CACHE_HIT`
   - `LLM_DEMO_REQUIRE_DECODE_CACHE_HIT`
+  - `ASYNC_WAIT_HEADROOM_WARN_RATIO`（store async wait 余量预警阈值，默认 0.15）
+- 评测顺序：
+  - `LLM_DEMO_RUN_ORDER`：`baseline_first` / `candidate_first`（用于控制热缓存偏置）

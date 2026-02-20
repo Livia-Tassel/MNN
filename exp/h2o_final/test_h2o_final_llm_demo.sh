@@ -24,6 +24,7 @@ REQUIRE_RUNTIME_DECOMP="${REQUIRE_RUNTIME_DECOMP:-1}"
 REQUIRE_DECODE_CACHE_HIT="${REQUIRE_DECODE_CACHE_HIT:-0}"
 REQUIRE_BASELINE_DECODE="${REQUIRE_BASELINE_DECODE:-1}"
 REQUIRE_BUCKET_DECODE_PASS="${REQUIRE_BUCKET_DECODE_PASS:-1}"
+LLM_DEMO_RUN_ORDER="${LLM_DEMO_RUN_ORDER:-baseline_first}"
 
 # Candidate knobs (aligned with runtime script defaults)
 H2O_KEEP_RATIO="${H2O_KEEP_RATIO:-0.30}"
@@ -92,6 +93,7 @@ echo " MAX_PROMPTS_PER_BUCKET = ${MAX_PROMPTS_PER_BUCKET}"
 echo " PROMPT_BUCKET_LIST = ${PROMPT_BUCKET_LIST}"
 echo " PROMPT_SAMPLE_MODE = ${PROMPT_SAMPLE_MODE}"
 echo " REQUIRE_BASELINE_DECODE = ${REQUIRE_BASELINE_DECODE}"
+echo " LLM_DEMO_RUN_ORDER = ${LLM_DEMO_RUN_ORDER}"
 echo "============================================================"
 
 python3 - "${MODEL_CONFIG}" "${BASELINE_CFG}" "${CANDIDATE_CFG}" <<'PY'
@@ -232,17 +234,31 @@ if [[ -n "${PROMPT_BUCKET_LIST}" ]]; then
   RUN_PROMPT_ARGS+=(--bucket-list "${PROMPT_BUCKET_LIST}")
 fi
 
-python3 exp/h2o_final/run_llm_demo_real_prompt_final.py \
-  "${RUN_PROMPT_ARGS[@]}" \
-  --config "${BASELINE_CFG}" \
-  --run-tag baseline \
-  --out-dir "${BASELINE_OUT}"
+run_llm_demo_case() {
+  local run_tag="$1"
+  local cfg="$2"
+  local out_dir="$3"
+  python3 exp/h2o_final/run_llm_demo_real_prompt_final.py \
+    "${RUN_PROMPT_ARGS[@]}" \
+    --config "${cfg}" \
+    --run-tag "${run_tag}" \
+    --out-dir "${out_dir}"
+}
 
-python3 exp/h2o_final/run_llm_demo_real_prompt_final.py \
-  "${RUN_PROMPT_ARGS[@]}" \
-  --config "${CANDIDATE_CFG}" \
-  --run-tag candidate \
-  --out-dir "${CANDIDATE_OUT}"
+case "${LLM_DEMO_RUN_ORDER}" in
+  baseline_first)
+    run_llm_demo_case baseline "${BASELINE_CFG}" "${BASELINE_OUT}"
+    run_llm_demo_case candidate "${CANDIDATE_CFG}" "${CANDIDATE_OUT}"
+    ;;
+  candidate_first)
+    run_llm_demo_case candidate "${CANDIDATE_CFG}" "${CANDIDATE_OUT}"
+    run_llm_demo_case baseline "${BASELINE_CFG}" "${BASELINE_OUT}"
+    ;;
+  *)
+    echo "FAIL: invalid LLM_DEMO_RUN_ORDER=${LLM_DEMO_RUN_ORDER} (expected baseline_first|candidate_first)"
+    exit 1
+    ;;
+esac
 
 python3 - \
   "${BASELINE_OUT}/baseline_summary.json" \
@@ -252,6 +268,7 @@ python3 - \
   "${REQUIRE_DECODE_CACHE_HIT}" \
   "${REQUIRE_BASELINE_DECODE}" \
   "${REQUIRE_BUCKET_DECODE_PASS}" \
+  "${LLM_DEMO_RUN_ORDER}" \
   "${REPORT_MD}" \
   "${REPORT_JSON}" <<'PY'
 import json
@@ -265,8 +282,9 @@ require_runtime_decomp = int(sys.argv[4]) != 0
 require_decode_cache_hit = int(sys.argv[5]) != 0
 require_baseline_decode = int(sys.argv[6]) != 0
 require_bucket_decode_pass = int(sys.argv[7]) != 0
-report_md = Path(sys.argv[8])
-report_json = Path(sys.argv[9])
+run_order = sys.argv[8]
+report_md = Path(sys.argv[9])
+report_json = Path(sys.argv[10])
 
 baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
@@ -389,6 +407,7 @@ report = {
     "decode_cache_hit_pass": decode_cache_hit_pass,
     "require_baseline_decode": require_baseline_decode,
     "require_bucket_decode_pass": require_bucket_decode_pass,
+    "run_order": run_order,
     "bucket_gate_pass": bucket_gate_pass,
     "bucket_decode_pass": bucket_decode_pass,
     "bucket_sample_alignment_pass": bucket_sample_alignment_pass,
@@ -430,6 +449,7 @@ lines.append(f"- decode_cache_hit_best: {decode_cache_hit_best:.4f}")
 lines.append(f"- decode_cache_hit_pass: {str(decode_cache_hit_pass).lower()}")
 lines.append(f"- require_baseline_decode: {str(require_baseline_decode).lower()}")
 lines.append(f"- require_bucket_decode_pass: {str(require_bucket_decode_pass).lower()}")
+lines.append(f"- run_order: {run_order}")
 lines.append(f"- bucket_gate_pass: {str(bucket_gate_pass).lower()}")
 lines.append(f"- bucket_decode_pass: {str(bucket_decode_pass).lower()}")
 lines.append(f"- bucket_sample_alignment_pass: {str(bucket_sample_alignment_pass).lower()}")

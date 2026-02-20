@@ -145,6 +145,9 @@ def runtime_row(
         "decode_drop_target": parse_float(gate.get("decode_drop_target", 0.0)),
         "runtime_decomp_best_us": parse_float(gate.get("runtime_decomp_best_us", 0.0)),
         "runtime_async_wait_best_us": parse_float(gate.get("runtime_async_wait_best_us", 0.0)),
+        "runtime_async_wait_headroom_us": parse_float(gate.get("runtime_async_wait_headroom_us", 0.0)),
+        "runtime_async_wait_headroom_ratio": parse_float(gate.get("runtime_async_wait_headroom_ratio", 0.0)),
+        "runtime_async_wait_headroom_warn": gate.get("runtime_async_wait_headroom_warn", "").lower() == "true",
         "runtime_queue_peak_best": parse_float(gate.get("runtime_queue_peak_best", 0.0)),
         "runtime_fallback_best": parse_float(gate.get("runtime_fallback_best", 0.0)),
         "runtime_backpressure_skip_best": parse_float(gate.get("runtime_backpressure_skip_best", 0.0)),
@@ -214,6 +217,7 @@ def llm_demo_row(
         "runtime_decomp_best_us": float(obj.get("runtime_decomp_best_us", 0.0)),
         "decode_cache_hit_best": float(obj.get("decode_cache_hit_best", 0.0)),
         "decode_pass": bool(obj.get("decode_pass", False)),
+        "run_order": str(obj.get("run_order", "")),
     }
 
 
@@ -263,6 +267,7 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
                 f"drop={r['decode_drop_ratio']:.6f}/{r['decode_drop_target']:.6f}, "
                 f"lossy={r['lossy_best']:.4f}, lossless={r['lossless_selected_value']:.4f}, "
                 f"decomp_us={r['runtime_decomp_best_us']:.4f}, async_wait_us={r['runtime_async_wait_best_us']:.4f}, "
+                f"async_wait_headroom={r.get('runtime_async_wait_headroom_ratio', 0.0):.4f}, "
                 f"queue={r['runtime_queue_peak_best']:.4f}, fallback={r['runtime_fallback_best']:.4f}, "
                 f"cache_hit={r['runtime_decode_cache_hit_best']:.4f}, cache_miss={r['runtime_decode_cache_miss_best']:.4f}, "
                 f"kv_consistency={str(r.get('kv_content_consistency_pass', True)).lower()}, "
@@ -283,7 +288,8 @@ def write_report(base_out: Path, rows: List[Dict]) -> Dict:
                 f"drop={r['decode_drop_ratio']:.6f}/{r['decode_drop_target']:.6f}, "
                 f"lossy={r['candidate_lossy_ratio_avg']:.4f}, lossless={r['candidate_lossless_ratio_avg']:.4f}, "
                 f"total={r['candidate_runtime_total_ratio_avg']:.4f}, decomp_us={r['runtime_decomp_best_us']:.4f}, "
-                f"cache_hit={r['decode_cache_hit_best']:.4f}, summary=`{r['summary']}`{reason_seg}"
+                f"cache_hit={r['decode_cache_hit_best']:.4f}, run_order={r.get('run_order', '')}, "
+                f"summary=`{r['summary']}`{reason_seg}"
             )
         lines.append("")
 
@@ -344,6 +350,7 @@ def main() -> int:
         "MAX_LOSSLESS_QUEUE_PEAK": str(env_int("MAX_LOSSLESS_QUEUE_PEAK", 8)),
         "MAX_LOSSLESS_FALLBACK": str(env_int("MAX_LOSSLESS_FALLBACK", 0)),
         "MAX_LOSSLESS_BACKPRESSURE_SKIP": str(env_int("MAX_LOSSLESS_BACKPRESSURE_SKIP", -1)),
+        "ASYNC_WAIT_HEADROOM_WARN_RATIO": f"{env_float('ASYNC_WAIT_HEADROOM_WARN_RATIO', 0.15):.6f}",
         "REQUIRE_DECODE_CACHE_HIT": str(env_int("REQUIRE_DECODE_CACHE_HIT", 0)),
         "REQUIRE_ASYNC_QUEUE_ACTIVITY": str(env_int("REQUIRE_ASYNC_QUEUE_ACTIVITY", 0)),
         "REQUIRE_DECODE_CACHE_ACTIVITY": str(env_int("REQUIRE_DECODE_CACHE_ACTIVITY", 0)),
@@ -379,8 +386,9 @@ def main() -> int:
         "REQUIRE_RUNTIME_DECOMP": "1",
         "REQUIRE_KV_CONTENT_CONSISTENCY": "1",
         "KV_LOSSLESS_STORE_DISABLE_FRONT": str(env_int("KV_LOSSLESS_STORE_DISABLE_FRONT", 1)),
-        "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 16)),
-        "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 384)),
+        # Use conservative defaults to reduce async wait spikes in store mode.
+        "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 32)),
+        "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 256)),
         "MAX_LOSSLESS_DECOMP_US": str(env_int("STORE_MAX_LOSSLESS_DECOMP_US", 70000)),
         "MAX_LOSSLESS_ASYNC_WAIT_US": str(env_int("STORE_MAX_LOSSLESS_ASYNC_WAIT_US", 40000)),
     }
@@ -399,13 +407,14 @@ def main() -> int:
         "REQUIRE_DECODE_CACHE_HIT": str(env_int("LLM_DEMO_REQUIRE_DECODE_CACHE_HIT", 0)),
         "REQUIRE_BASELINE_DECODE": str(env_int("LLM_DEMO_REQUIRE_BASELINE_DECODE", 1)),
         "REQUIRE_BUCKET_DECODE_PASS": str(env_int("LLM_DEMO_REQUIRE_BUCKET_DECODE_PASS", 1)),
+        "LLM_DEMO_RUN_ORDER": env_str("LLM_DEMO_RUN_ORDER", "baseline_first"),
         "KV_LOSSLESS_ASYNC_THREADS": str(env_int("KV_LOSSLESS_ASYNC_THREADS", 2)),
         "KV_LOSSLESS_DECODE_CACHE_BLOCKS": str(env_int("KV_LOSSLESS_DECODE_CACHE_BLOCKS", 64)),
     }
     llm_store_extra = {
         "KV_LOSSLESS_STORE_DISABLE_FRONT": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_DISABLE_FRONT", 1)),
-        "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 16)),
-        "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 384)),
+        "KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 32)),
+        "KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS": str(env_int("LLM_DEMO_KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 256)),
         "KV_LOSSLESS_MAX_QUEUE": str(env_int("LLM_DEMO_KV_LOSSLESS_MAX_QUEUE", 64)),
     }
 

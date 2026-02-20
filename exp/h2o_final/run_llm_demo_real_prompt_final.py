@@ -248,6 +248,21 @@ def select_prompt_files(bucket_map, bucket_order, sample_mode, max_prompts, max_
     return selected
 
 
+def select_manifest_ordered_files(files, max_prompts, max_prompts_per_bucket):
+    selected = []
+    bucket_used = {}
+    for path in files:
+        bucket = infer_prompt_bucket(path)
+        used = int(bucket_used.get(bucket, 0))
+        if max_prompts_per_bucket > 0 and used >= max_prompts_per_bucket:
+            continue
+        selected.append(path)
+        bucket_used[bucket] = used + 1
+        if max_prompts > 0 and len(selected) >= max_prompts:
+            break
+    return selected
+
+
 def summarize_rows(rows):
     decode_tps_values = [float(r.get("decode_tps", 0.0)) for r in rows if float(r.get("decode_tps", 0.0)) > 0.0]
     keep_values = []
@@ -309,6 +324,7 @@ def main():
     args = parser.parse_args()
 
     prompt_dir = Path(args.prompt_dir)
+    manifest_mode = bool(args.prompt_manifest)
     if args.prompt_manifest:
         files = load_prompt_files_from_manifest(Path(args.prompt_manifest), prompt_dir)
         if args.prompt_pattern:
@@ -316,15 +332,26 @@ def main():
     else:
         files = sorted(prompt_dir.glob(args.prompt_pattern))
 
-    bucket_map = build_bucket_map(files)
-    bucket_order = build_bucket_order(bucket_map, parse_bucket_list(args.bucket_list))
-    files = select_prompt_files(
-        bucket_map=bucket_map,
-        bucket_order=bucket_order,
-        sample_mode=args.sample_mode,
-        max_prompts=int(args.max_prompts),
-        max_prompts_per_bucket=int(args.max_prompts_per_bucket),
-    )
+    requested_buckets = parse_bucket_list(args.bucket_list)
+    if manifest_mode and args.sample_mode == "sequential":
+        # Preserve manifest order for reproducible fixed subsets.
+        files = select_manifest_ordered_files(
+            files=files,
+            max_prompts=int(args.max_prompts),
+            max_prompts_per_bucket=int(args.max_prompts_per_bucket),
+        )
+        bucket_map = build_bucket_map(files)
+        bucket_order = build_bucket_order(bucket_map, requested_buckets)
+    else:
+        bucket_map = build_bucket_map(files)
+        bucket_order = build_bucket_order(bucket_map, requested_buckets)
+        files = select_prompt_files(
+            bucket_map=bucket_map,
+            bucket_order=bucket_order,
+            sample_mode=args.sample_mode,
+            max_prompts=int(args.max_prompts),
+            max_prompts_per_bucket=int(args.max_prompts_per_bucket),
+        )
     if not files:
         raise SystemExit(
             f"No prompt files found under {prompt_dir} with pattern {args.prompt_pattern}"
@@ -447,10 +474,11 @@ def main():
         "run_tag": args.run_tag,
         "prompt_pattern": args.prompt_pattern,
         "prompt_manifest": args.prompt_manifest,
+        "manifest_mode": manifest_mode,
         "max_prompts": int(args.max_prompts),
         "max_prompts_per_bucket": int(args.max_prompts_per_bucket),
         "sample_mode": args.sample_mode,
-        "bucket_list": parse_bucket_list(args.bucket_list),
+        "bucket_list": requested_buckets,
         "bucket_order": ordered_buckets,
         "total_runs": summary_metrics["total_runs"],
         "pass_runs": summary_metrics["pass_runs"],
@@ -479,6 +507,7 @@ def main():
     lines.append(f"- overall_pass: {str(summary['overall_pass']).lower()}")
     lines.append(f"- prompt_pattern: {summary['prompt_pattern']}")
     lines.append(f"- prompt_manifest: {summary['prompt_manifest']}")
+    lines.append(f"- manifest_mode: {str(bool(summary['manifest_mode'])).lower()}")
     lines.append(f"- max_prompts: {summary['max_prompts']}")
     lines.append(f"- max_prompts_per_bucket: {summary['max_prompts_per_bucket']}")
     lines.append(f"- sample_mode: {summary['sample_mode']}")
