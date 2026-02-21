@@ -807,10 +807,16 @@ size_t CPUKVCacheManager::keyIndex(int seq, int dim) const {
 }
 
 size_t CPUKVCacheManager::valueIndex(int seq, int dim) const {
-    return (dim / hP) * ROUND_UP(mMaxLength, lP) * hP +
-           (seq / lP) * hP * lP +
-           (dim % hP) * lP +
-           (seq % lP);
+    const int FA = static_cast<int>(mFlashAttentionUpperKv);
+    const size_t stride2 = static_cast<size_t>(lP) * static_cast<size_t>(hP);
+    const size_t stride1 = static_cast<size_t>(UP_DIV(FA, lP)) * stride2;
+    const size_t stride0 = stride1 * static_cast<size_t>(UP_DIV(mHeadDim, hP));
+    const int seqInBlock = seq % FA;
+    return static_cast<size_t>(seq / FA) * stride0
+         + static_cast<size_t>(dim / hP) * stride1
+         + static_cast<size_t>(seqInBlock / lP) * stride2
+         + static_cast<size_t>(dim % hP) * static_cast<size_t>(lP)
+         + static_cast<size_t>(seqInBlock % lP);
 }
 
 template <typename T>
