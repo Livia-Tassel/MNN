@@ -35,9 +35,11 @@ H2O_TARGET_MODE="${H2O_TARGET_MODE:-adaptive}"
 H2O_TARGET_LOSSY_RATIO="${H2O_TARGET_LOSSY_RATIO:-3.5}"
 H2O_EMA_ALPHA="${H2O_EMA_ALPHA:-0.9}"
 H2O_UPDATE_INTERVAL="${H2O_UPDATE_INTERVAL:-16}"
+H2O_ENABLE="${H2O_ENABLE:-1}"
 H2O_TRIGGER_MIN="${H2O_TRIGGER_MIN:-384}"
 H2O_LAYER_START="${H2O_LAYER_START:-2}"
 H2O_LAYER_END="${H2O_LAYER_END:--1}"
+KV_LOSSLESS_ENABLE="${KV_LOSSLESS_ENABLE:-1}"
 KV_LOSSLESS_SCOPE="${KV_LOSSLESS_SCOPE:-front_n_and_h2o_kept}"
 KV_LOSSLESS_FRONT_N="${KV_LOSSLESS_FRONT_N:-2}"
 KV_LOSSLESS_CODEC="${KV_LOSSLESS_CODEC:-gear_delta}"
@@ -175,7 +177,7 @@ def getb(name, default):
 candidate = dict(obj)
 normalize_base_dir_and_paths(candidate, base_cfg)
 candidate.update({
-    "kv_h2o_enable": True,
+    "kv_h2o_enable": getb("H2O_ENABLE", True),
     "kv_h2o_layer_start": geti("H2O_LAYER_START", 2),
     "kv_h2o_layer_end": geti("H2O_LAYER_END", -1),
     "kv_h2o_block_tokens": geti("H2O_BLOCK_TOKENS", 32),
@@ -188,11 +190,11 @@ candidate.update({
     "kv_h2o_update_interval": geti("H2O_UPDATE_INTERVAL", 16),
     "kv_h2o_trigger_min_tokens": geti("H2O_TRIGGER_MIN", 384),
     "kv_h2o_log_stats": getb("H2O_LOG_STATS", False),
-    "kv_lossless_enable": True,
+    "kv_lossless_enable": getb("KV_LOSSLESS_ENABLE", True),
     "kv_lossless_scope": gets("KV_LOSSLESS_SCOPE", "front_n_and_h2o_kept"),
     "kv_lossless_front_n": geti("KV_LOSSLESS_FRONT_N", 2),
     "kv_lossless_codec": gets("KV_LOSSLESS_CODEC", "gear_delta"),
-    "kv_lossless_runtime_enable": True,
+    "kv_lossless_runtime_enable": getb("KV_LOSSLESS_ENABLE", True),
     "kv_lossless_runtime_mode": gets("KV_LOSSLESS_RUNTIME_MODE", "full"),
     "kv_lossless_block_tokens": geti("KV_LOSSLESS_BLOCK_TOKENS", 128),
     "kv_lossless_hot_recent_tokens": geti("KV_LOSSLESS_HOT_RECENT", 256),
