@@ -2334,13 +2334,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     int finalKeepTokensForLayer = kvSeqLen;
     CPUAttention::H2OSharedState::LayerState* scoreStatePtr = nullptr;
     if (mMeta != nullptr && mMeta->h2o_in_decode != 0 && mH2OState != nullptr) {
-        // Keep one global score state so trigger cadence is stable even if runtime
-        // does not expose per-layer execution boundaries.
-        if (mH2OState->layerStates.empty()) {
-            mH2OState->layerStates.resize(1);
-            mH2OState->layerCacheManagers.resize(1, nullptr);
+        // Use per-layer score state so each layer accumulates its own EMA
+        // attention scores independently.  A shared (index-0) score state
+        // causes corruption when one layer evicts and remaps its blockScores
+        // while other layers still have different KV lengths and block counts.
+        if (layerIndex >= 0 && layerIndex < (int)mH2OState->layerStates.size()) {
+            scoreStatePtr = &mH2OState->layerStates[layerIndex];
         }
-        scoreStatePtr = &mH2OState->layerStates[0];
     }
 
     if (h2oEnabled && h2oBlockCount > 0 && mMeta != nullptr && scoreStatePtr != nullptr) {
