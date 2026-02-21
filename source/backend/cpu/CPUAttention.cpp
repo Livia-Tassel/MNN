@@ -2401,6 +2401,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             targetKeep = ALIMAX(1, ALIMIN(kvSeqLen, targetKeep));
             const int targetKeepBeforeFloor = targetKeep;
             targetKeep = ALIMAX(targetKeep, keptTokens);
+            // When sink+recent floor already meets the original target, any
+            // evicted tokens are non-selected middle tokens — blind eviction
+            // that destroys prompt context without quality-aware selection.
+            const bool floorDominatesTarget = (keptTokens >= targetKeepBeforeFloor);
             mMeta->h2o_target_keep_effective = kvSeqLen > 0 ? (float)targetKeep / (float)kvSeqLen : 1.0f;
             if (mMeta->h2o_log_stats != 0 && keptTokens > targetKeepBeforeFloor) {
                 MNN_PRINT("[H2O] floor-keep dominates target: kv=%d target=%d floor=%d (sink=%d recent=%d block=%d)\n",
@@ -2472,7 +2476,13 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                 finalKeepTokens += reservePairs[i + 1];
             }
             finalKeepTokensForLayer = finalKeepTokens;
-            const int evictedTokens = ALIMAX(0, kvSeqLen - finalKeepTokens);
+            // Skip eviction when floor dominates: the protected zones (sink +
+            // recent) already satisfy the compression target, so there is no
+            // score-based selection.  Evicting the remaining middle tokens
+            // would blindly destroy prompt context.
+            const int evictedTokens = floorDominatesTarget
+                ? 0
+                : ALIMAX(0, kvSeqLen - finalKeepTokens);
             const size_t reserveMetaBytes = (size_t)reservePairs.size() * sizeof(int);
 
             if (mH2OState != nullptr
