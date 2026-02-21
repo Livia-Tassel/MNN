@@ -49,8 +49,8 @@ KV_LOSSLESS_KEPT_SAMPLE_LAYERS="${KV_LOSSLESS_KEPT_SAMPLE_LAYERS:-1}"
 KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL="${KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL:-2}"
 KV_LOSSLESS_FRONT_SAMPLE_TOKEN_INTERVAL="${KV_LOSSLESS_FRONT_SAMPLE_TOKEN_INTERVAL:-1}"
 KV_LOSSLESS_STORE_DISABLE_FRONT="${KV_LOSSLESS_STORE_DISABLE_FRONT:-0}"
-KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS="${KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS:-32}"
-KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS="${KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS:-256}"
+KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS="${KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS:-16}"
+KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS="${KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS:-384}"
 KV_LOSSLESS_CODEC_RUNTIME="${KV_LOSSLESS_CODEC_RUNTIME:-fp16_gear_predictive_v3}"
 KV_LOSSLESS_PREDICTORS_K="${KV_LOSSLESS_PREDICTORS_K:-raw,delta_seq,xor_seq,pair_delta}"
 KV_LOSSLESS_PREDICTORS_V="${KV_LOSSLESS_PREDICTORS_V:-raw,delta_seq,xor_seq}"
@@ -201,8 +201,8 @@ candidate.update({
     "kv_lossless_kept_sample_token_interval": geti("KV_LOSSLESS_KEPT_SAMPLE_TOKEN_INTERVAL", 2),
     "kv_lossless_front_sample_token_interval": geti("KV_LOSSLESS_FRONT_SAMPLE_TOKEN_INTERVAL", 1),
     "kv_lossless_store_disable_front": getb("KV_LOSSLESS_STORE_DISABLE_FRONT", False),
-    "kv_lossless_store_bootstrap_tokens": geti("KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 32),
-    "kv_lossless_store_grouped_step_tokens": geti("KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 256),
+    "kv_lossless_store_bootstrap_tokens": geti("KV_LOSSLESS_STORE_BOOTSTRAP_TOKENS", 16),
+    "kv_lossless_store_grouped_step_tokens": geti("KV_LOSSLESS_STORE_GROUPED_STEP_TOKENS", 384),
     "kv_lossless_codec_runtime": gets("KV_LOSSLESS_CODEC_RUNTIME", "fp16_gear_predictive_v3"),
     "kv_lossless_predictors_k": gets("KV_LOSSLESS_PREDICTORS_K", "raw,delta_seq,xor_seq,pair_delta"),
     "kv_lossless_predictors_v": gets("KV_LOSSLESS_PREDICTORS_V", "raw,delta_seq,xor_seq"),
