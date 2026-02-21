@@ -2483,7 +2483,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const int evictedTokens = floorDominatesTarget
                 ? 0
                 : ALIMAX(0, kvSeqLen - finalKeepTokens);
-            const size_t reserveMetaBytes = (size_t)reservePairs.size() * sizeof(int);
+            // When floor dominates, no compaction will occur — report the true
+            // state (all tokens kept, zero reserve overhead) so downstream
+            // budget / ratio consumers (lossless scope, hot-zone, shrink
+            // detection) stay consistent with the actual KV length.
+            if (floorDominatesTarget) {
+                finalKeepTokens = kvSeqLen;
+                finalKeepTokensForLayer = kvSeqLen;
+            }
+            const size_t reserveMetaBytes = floorDominatesTarget
+                ? 0
+                : (size_t)reservePairs.size() * sizeof(int);
 
             if (mH2OState != nullptr
                 && layerIndex >= 0
