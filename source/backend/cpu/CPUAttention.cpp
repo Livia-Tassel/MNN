@@ -2523,8 +2523,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const size_t rawBefore = (size_t)kvSeqLen * bytesPerToken;
             const size_t rawAfter = (size_t)finalKeepTokens * bytesPerToken;
             const size_t lossyDen = rawAfter + reserveMetaBytes;
-            mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
-            mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
+            if (!floorDominatesTarget) {
+                mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
+                mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;
+            }
             mMeta->h2o_last_evict_tokens = evictedTokens;
 
             if (evictedTokens > 0) {
