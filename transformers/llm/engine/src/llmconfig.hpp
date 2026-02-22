@@ -133,7 +133,7 @@ public:
     float value(const char* key, const float& default_value) const {
         if (document.HasMember(key)) {
             const auto& value = document[key];
-            if (value.IsFloat()) return value.GetFloat();
+            if (value.IsNumber()) return (float)value.GetDouble();
         }
         return default_value;
     }
@@ -449,6 +449,111 @@ public:
     }
     bool kvcache_mmap() const {
         return config_.value("kvcache_mmap", false);
+    }
+    bool kv_h2o_enable() const {
+        return config_.value("kv_h2o_enable", false);
+    }
+    int kv_h2o_layer_start() const {
+        return config_.value("kv_h2o_layer_start", 2);
+    }
+    int kv_h2o_layer_end() const {
+        return config_.value("kv_h2o_layer_end", -1);
+    }
+    int kv_h2o_block_tokens() const {
+        return config_.value("kv_h2o_block_tokens", 64);
+    }
+    int kv_h2o_sink_tokens() const {
+        return config_.value("kv_h2o_sink_tokens", 32);
+    }
+    int kv_h2o_recent_tokens() const {
+        return config_.value("kv_h2o_recent_tokens", 256);
+    }
+    float kv_h2o_target_keep_ratio() const {
+        return config_.value("kv_h2o_target_keep_ratio", 0.50f);
+    }
+    std::string kv_h2o_target_mode() const {
+        return config_.value("kv_h2o_target_mode", "adaptive");
+    }
+    float kv_h2o_target_lossy_ratio() const {
+        return config_.value("kv_h2o_target_lossy_ratio", 3.0f);
+    }
+    float kv_h2o_ema_alpha() const {
+        return config_.value("kv_h2o_ema_alpha", 0.90f);
+    }
+    int kv_h2o_update_interval() const {
+        return config_.value("kv_h2o_update_interval", 16);
+    }
+    int kv_h2o_trigger_min_tokens() const {
+        return config_.value("kv_h2o_trigger_min_tokens", 512);
+    }
+    bool kv_h2o_log_stats() const {
+        return config_.value("kv_h2o_log_stats", false);
+    }
+    bool kv_lossless_enable() const {
+        return config_.value("kv_lossless_enable", false);
+    }
+    std::string kv_lossless_scope() const {
+        return config_.value("kv_lossless_scope", "front_n");
+    }
+    int kv_lossless_front_n() const {
+        return config_.value("kv_lossless_front_n", 2);
+    }
+    std::string kv_lossless_codec() const {
+        return config_.value("kv_lossless_codec", "none");
+    }
+    bool kv_lossless_runtime_enable() const {
+        return config_.value("kv_lossless_runtime_enable", false);
+    }
+    std::string kv_lossless_runtime_mode() const {
+        return config_.value("kv_lossless_runtime_mode", "probe");
+    }
+    int kv_lossless_block_tokens() const {
+        return config_.value("kv_lossless_block_tokens", 128);
+    }
+    int kv_lossless_hot_recent_tokens() const {
+        return config_.value("kv_lossless_hot_recent_tokens", 256);
+    }
+    int kv_lossless_hot_sink_tokens() const {
+        return config_.value("kv_lossless_hot_sink_tokens", 16);
+    }
+    int kv_lossless_kept_sample_layers() const {
+        return config_.value("kv_lossless_kept_sample_layers", 1);
+    }
+    int kv_lossless_kept_sample_token_interval() const {
+        return config_.value("kv_lossless_kept_sample_token_interval", 1);
+    }
+    int kv_lossless_front_sample_token_interval() const {
+        return config_.value("kv_lossless_front_sample_token_interval", 1);
+    }
+    bool kv_lossless_store_disable_front() const {
+        return config_.value("kv_lossless_store_disable_front", false);
+    }
+    int kv_lossless_store_bootstrap_tokens() const {
+        return config_.value("kv_lossless_store_bootstrap_tokens", 32);
+    }
+    int kv_lossless_store_grouped_step_tokens() const {
+        return config_.value("kv_lossless_store_grouped_step_tokens", 256);
+    }
+    std::string kv_lossless_codec_runtime() const {
+        return config_.value("kv_lossless_codec_runtime", "fp16_gear_predictive_v3");
+    }
+    std::string kv_lossless_predictors_k() const {
+        return config_.value("kv_lossless_predictors_k", "raw,delta_seq,xor_seq,pair_delta");
+    }
+    std::string kv_lossless_predictors_v() const {
+        return config_.value("kv_lossless_predictors_v", "raw,delta_seq,xor_seq");
+    }
+    int kv_lossless_async_threads() const {
+        return config_.value("kv_lossless_async_threads", 1);
+    }
+    int kv_lossless_max_queue() const {
+        return config_.value("kv_lossless_max_queue", 256);
+    }
+    int kv_lossless_decode_cache_blocks() const {
+        return config_.value("kv_lossless_decode_cache_blocks", 64);
+    }
+    bool kv_lossless_strict_roundtrip_check() const {
+        return config_.value("kv_lossless_strict_roundtrip_check", false);
     }
     std::string tmp_path() const {
         return config_.value("tmp_path", "");

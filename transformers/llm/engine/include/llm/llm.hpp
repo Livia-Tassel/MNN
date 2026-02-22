@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -91,6 +92,29 @@ struct LlmContext {
     std::vector<int> history_tokens;
     std::vector<int> output_tokens;
     std::string generate_str;
+    // h2o / kv compression stats
+    float h2o_keep_ratio = 1.0f;
+    float h2o_lossy_ratio = 1.0f;
+    float h2o_lossless_ratio = 1.0f;
+    float h2o_target_keep_effective = 1.0f;
+    float h2o_floor_keep_by_recent_sink = 1.0f;
+    float h2o_block_quantized_keep = 1.0f;
+    int64_t h2o_evict_us = 0;
+    int64_t h2o_codec_us = 0;
+    uint64_t h2o_lossless_raw_bytes = 0;
+    uint64_t h2o_lossless_compressed_bytes = 0;
+    uint64_t h2o_lossless_decompressed_bytes = 0;
+    int64_t h2o_lossless_compress_us = 0;
+    int64_t h2o_lossless_decompress_us = 0;
+    int64_t h2o_lossless_queue_depth_peak = 0;
+    int64_t h2o_lossless_fallback_count = 0;
+    int64_t h2o_lossless_backpressure_skip_count = 0;
+    int64_t h2o_lossless_async_queue_peak = 0;
+    int64_t h2o_lossless_async_wait_us = 0;
+    int64_t h2o_lossless_decode_cache_hit = 0;
+    int64_t h2o_lossless_decode_cache_miss = 0;
+    int h2o_last_evict_tokens = 0;
+    int h2o_total_evict_tokens = 0;
     // llm status
     LlmStatus status;
 };

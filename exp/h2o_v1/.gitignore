@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local OS/editor noise
+.DS_Store
+
+# Experiment outputs (default and custom out dirs)
+out/
+out_*/
+
+# Optional local artifacts if written into this folder
+*.log
+*.csv

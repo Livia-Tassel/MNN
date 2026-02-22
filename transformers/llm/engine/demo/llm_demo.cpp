@@ -19,6 +19,40 @@
 #endif
 using namespace MNN::Transformer;
 
+static void append_metrics_jsonl(const std::string& path, int prompt_index, const LlmContext* context) {
+    if (path.empty() || context == nullptr) {
+        return;
+    }
+    std::ofstream of(path, std::ios::app);
+    if (!of.good()) {
+        return;
+    }
+    of << "{\"prompt_index\":" << prompt_index
+       << ",\"prompt_tokens\":" << context->prompt_len
+       << ",\"decode_tokens\":" << context->gen_seq_len
+       << ",\"prefill_us\":" << context->prefill_us
+       << ",\"decode_us\":" << context->decode_us
+       << ",\"sample_us\":" << context->sample_us
+       << ",\"h2o_keep_ratio\":" << context->h2o_keep_ratio
+       << ",\"h2o_lossy_ratio\":" << context->h2o_lossy_ratio
+       << ",\"h2o_lossless_ratio\":" << context->h2o_lossless_ratio
+       << ",\"h2o_lossless_raw_bytes\":" << context->h2o_lossless_raw_bytes
+       << ",\"h2o_lossless_compressed_bytes\":" << context->h2o_lossless_compressed_bytes
+       << ",\"h2o_lossless_decompressed_bytes\":" << context->h2o_lossless_decompressed_bytes
+       << ",\"h2o_lossless_compress_us\":" << context->h2o_lossless_compress_us
+       << ",\"h2o_lossless_decompress_us\":" << context->h2o_lossless_decompress_us
+       << ",\"h2o_lossless_queue_depth_peak\":" << context->h2o_lossless_queue_depth_peak
+       << ",\"h2o_lossless_fallback_count\":" << context->h2o_lossless_fallback_count
+       << ",\"h2o_lossless_backpressure_skip\":" << context->h2o_lossless_backpressure_skip_count
+       << ",\"h2o_lossless_async_queue_peak\":" << context->h2o_lossless_async_queue_peak
+       << ",\"h2o_lossless_async_wait_us\":" << context->h2o_lossless_async_wait_us
+       << ",\"h2o_lossless_decode_cache_hit\":" << context->h2o_lossless_decode_cache_hit
+       << ",\"h2o_lossless_decode_cache_miss\":" << context->h2o_lossless_decode_cache_miss
+       << ",\"h2o_last_evict_tokens\":" << context->h2o_last_evict_tokens
+       << ",\"h2o_total_evict_tokens\":" << context->h2o_total_evict_tokens
+       << "}\n";
+}
+
 static void tuning_prepare(Llm* llm) {
     MNN_PRINT("Prepare for tuning opt Begin\n");
     llm->tuning(OP_ENCODER_NUMBER, {1, 5, 10, 20, 30, 50, 100});
@@ -68,7 +102,7 @@ std::vector<std::vector<std::string>> parse_csv(const std::vector<std::string>& 
     return csv_data;
 }
 
-static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_token_number) {
+static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_token_number, const std::string& metrics_jsonl) {
     int prompt_len = 0;
     int decode_len = 0;
     int64_t prefill_time = 0;
@@ -77,7 +111,10 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
     // llm->warmup();
     auto context = llm->getContext();
     if (max_token_number > 0) {
-        llm->set_config("{\"max_new_tokens\":1}");
+        // Respect caller-provided decode budget for benchmark/eval scripts.
+        std::ostringstream cfg;
+        cfg << "{\"max_new_tokens\":" << max_token_number << "}";
+        llm->set_config(cfg.str());
     }
 #ifdef LLM_SUPPORT_AUDIO
     std::vector<float> waveform;
@@ -107,10 +144,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         }
         
         if (max_token_number >= 0) {
-            llm->response(prompt, &std::cout, nullptr, 0);
-            while (!llm->stoped() && context->gen_seq_len < max_token_number) {
-                llm->generate(1);
-            }
+            llm->response(prompt, &std::cout, nullptr, max_token_number);
         } else {
             llm->response(prompt);
         }
@@ -119,6 +153,7 @@ static int benchmark(Llm* llm, const std::vector<std::string>& prompts, int max_
         prefill_time += context->prefill_us;
         decode_time += context->decode_us;
         sample_time += context->sample_us;
+        append_metrics_jsonl(metrics_jsonl, i, context);
     }
     llm->generateWavform();
 
@@ -194,28 +229,32 @@ static int ceval(Llm* llm, const std::vector<std::string>& lines, std::string fi
     return 0;
 }
 
-static int eval(Llm* llm, std::string prompt_file, int max_token_number) {
+static int eval(Llm* llm, std::string prompt_file, int max_token_number, const std::string& metrics_jsonl, bool prompt_file_as_whole) {
     std::cout << "prompt file is " << prompt_file << std::endl;
     std::ifstream prompt_fs(prompt_file);
     std::vector<std::string> prompts;
     std::string prompt;
-//#define LLM_DEMO_ONELINE
-#ifdef LLM_DEMO_ONELINE
-    std::ostringstream tempOs;
-    tempOs << prompt_fs.rdbuf();
-    prompt = tempOs.str();
-    prompts = {prompt};
-#else
-    while (std::getline(prompt_fs, prompt)) {
-        if (prompt.empty()) {
-            continue;
-        }
-        if (prompt.back() == '\r') {
+    if (prompt_file_as_whole) {
+        std::ostringstream tempOs;
+        tempOs << prompt_fs.rdbuf();
+        prompt = tempOs.str();
+        while (!prompt.empty() && (prompt.back() == '\n' || prompt.back() == '\r')) {
             prompt.pop_back();
         }
-        prompts.push_back(prompt);
+        if (!prompt.empty()) {
+            prompts = {prompt};
+        }
+    } else {
+        while (std::getline(prompt_fs, prompt)) {
+            if (prompt.empty()) {
+                continue;
+            }
+            if (prompt.back() == '\r') {
+                prompt.pop_back();
+            }
+            prompts.push_back(prompt);
+        }
     }
-#endif
     prompt_fs.close();
     if (prompts.empty()) {
         return 1;
@@ -224,7 +263,7 @@ static int eval(Llm* llm, std::string prompt_file, int max_token_number) {
     if (prompts[0] == "id,question,A,B,C,D,answer") {
         return ceval(llm, prompts, prompt_file);
     }
-    return benchmark(llm, prompts, max_token_number);
+    return benchmark(llm, prompts, max_token_number, metrics_jsonl);
 }
 
 void chat(Llm* llm) {
@@ -253,7 +292,7 @@ void chat(Llm* llm) {
 int main(int argc, const char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " config.json <prompt.txt>" << std::endl;
-        return 0;
+        return 1;
     }
     MNN::BackendConfig backendConfig;
     auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
@@ -262,18 +301,27 @@ int main(int argc, const char* argv[]) {
     std::string config_path = argv[1];
     std::cout << "config path is " << config_path << std::endl;
     std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
-    llm->set_config("{\"tmp_path\":\"tmp\"}");
+    std::string tmp_path = "tmp";
+    if (const char* env_tmp_path = std::getenv("LLM_DEMO_TMP_PATH")) {
+        if (env_tmp_path[0] != '\0') {
+            tmp_path = env_tmp_path;
+        }
+    }
+    llm->set_config(std::string("{\"tmp_path\":\"") + tmp_path + "\"}");
     {
         AUTOTIME;
         bool res = llm->load();
         if (!res) {
             MNN_ERROR("LLM init error\n");
-            return 0;
+            return 1;
         }
     }
     if (true) {
         AUTOTIME;
         tuning_prepare(llm.get());
+        // Tuning may execute warmup decode/prefill passes that mutate KV/H2O runtime
+        // state. Ensure real eval starts from a clean context.
+        llm->reset();
     }
     if (argc < 3) {
         chat(llm.get());
@@ -284,7 +332,41 @@ int main(int argc, const char* argv[]) {
         std::istringstream os(argv[3]);
         os >> max_token_number;
     }
-    if (argc >= 5) {
+    std::string metrics_jsonl;
+    if (const char* env_metrics = std::getenv("LLM_DEMO_METRICS_JSONL")) {
+        metrics_jsonl = env_metrics;
+    }
+    bool disable_thinking = false;
+    bool prompt_file_as_whole = false;
+    for (int i = 4; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg.rfind("--metrics-jsonl=", 0) == 0) {
+            metrics_jsonl = arg.substr(std::string("--metrics-jsonl=").size());
+            continue;
+        }
+        if (arg == "--metrics-jsonl" && (i + 1) < argc) {
+            metrics_jsonl = argv[++i];
+            continue;
+        }
+        if (arg == "--no-thinking") {
+            disable_thinking = true;
+            continue;
+        }
+        if (arg == "--prompt-file-mode=whole" || arg == "--prompt-file-as-whole") {
+            prompt_file_as_whole = true;
+            continue;
+        }
+        if (arg == "--prompt-file-mode" && (i + 1) < argc) {
+            std::string mode = argv[++i];
+            if (mode == "whole" || mode == "file") {
+                prompt_file_as_whole = true;
+            }
+            continue;
+        }
+        // Keep backward compatibility: any extra 5th positional arg toggles no-thinking.
+        disable_thinking = true;
+    }
+    if (disable_thinking) {
         MNN_PRINT("Set not thinking, only valid for Qwen3\n");
         llm->set_config(R"({
             "jinja": {
@@ -298,5 +380,5 @@ int main(int argc, const char* argv[]) {
     llm->set_config(R"({
         "async":false
     })");
-    return eval(llm.get(), prompt_file, max_token_number);
+    return eval(llm.get(), prompt_file, max_token_number, metrics_jsonl, prompt_file_as_whole);
 }

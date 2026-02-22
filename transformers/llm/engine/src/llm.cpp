@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <unordered_set>
+#include <cstddef>
 
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
@@ -25,6 +26,7 @@
 #include "omni.hpp"
 #include "speculative_decoding/generate.hpp"
 #include "core/MNNFileUtils.h"
+#include "core/OpCommonUtils.hpp"
 
 // 0: no debug, 1: test op time, 2: print tensor info, 3: print tensor in output
 #define DEBUG_MODE 0
@@ -36,14 +38,61 @@ namespace Transformer {
 
 void KVMeta::sync() {
     int revertNumber = 0;
-    for (int i=0; i<n_reserve; ++i) {
-        revertNumber += reserve[2*i+1];
+    size_t removeBound = remove;
+    if (n_reserve > 0) {
+        if (reserve == nullptr) {
+            MNN_ERROR("KVMeta::sync got n_reserve=%d but reserve is null, drop reserve entries.\n", n_reserve);
+            n_reserve = 0;
+        } else {
+            for (int i = 0; i < n_reserve; ++i) {
+                const int begin = reserve[2 * i];
+                const int len = reserve[2 * i + 1];
+                const int64_t end = static_cast<int64_t>(begin) + static_cast<int64_t>(len);
+                if (begin < 0 || len <= 0 || end < static_cast<int64_t>(begin) || end > static_cast<int64_t>(removeBound)) {
+                    MNN_ERROR("KVMeta::sync got invalid reserve[%d]={begin=%d,len=%d,remove=%zu}, drop reserve entries.\n",
+                              i, begin, len);
+                    revertNumber = 0;
+                    n_reserve = 0;
+                    reserve = nullptr;
+                    break;
+                }
+                revertNumber += len;
+            }
+        }
     }
-    previous = previous - remove + add + revertNumber;
+    const size_t baseLen = previous + add;
+    if (remove > baseLen) {
+        MNN_ERROR("KVMeta::sync got remove=%zu > previous+add=%zu, clamp remove.\n", remove, baseLen);
+        remove = baseLen;
+        n_reserve = 0;
+        reserve = nullptr;
+        revertNumber = 0;
+    }
+    previous = baseLen - remove + static_cast<size_t>(ALIMAX(0, revertNumber));
     n_reserve = 0;
     reserve = nullptr;
     remove = 0;
     add = 0;
+}
+
+static void verifyKVMetaLayoutOnce() {
+#ifdef MNN_SUPPORT_TRANSFORMER_FUSE
+    static const bool checked = []() {
+        const bool aligned =
+            offsetof(MNN::KVMeta, h2o_enable) == offsetof(MNN::Transformer::KVMeta, h2o_enable) &&
+            offsetof(MNN::KVMeta, h2o_lossless_enable) == offsetof(MNN::Transformer::KVMeta, h2o_lossless_enable) &&
+            offsetof(MNN::KVMeta, h2o_pending_plan_ready) == offsetof(MNN::Transformer::KVMeta, h2o_pending_plan_ready) &&
+            offsetof(MNN::KVMeta, h2o_pending_remove) == offsetof(MNN::Transformer::KVMeta, h2o_pending_remove) &&
+            offsetof(MNN::KVMeta, h2o_lossless_decode_cache_miss) == offsetof(MNN::Transformer::KVMeta, h2o_lossless_decode_cache_miss) &&
+            offsetof(MNN::KVMeta, h2o_total_evict_tokens) == offsetof(MNN::Transformer::KVMeta, h2o_total_evict_tokens);
+        if (!aligned) {
+            MNN_ERROR("KVMeta layout mismatch between core::KVMeta and transformer::KVMeta.\n");
+        }
+        MNN_ASSERT(aligned);
+        return true;
+    }();
+    (void)checked;
+#endif
 }
 
 static MNNForwardType backend_type_convert(const std::string& type_str) {
@@ -62,6 +111,67 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "npu")
         return MNN_FORWARD_NN;
     return MNN_FORWARD_AUTO;
+}
+
+static void updateH2OMetaFromConfig(const std::shared_ptr<LlmConfig>& cfg, const std::shared_ptr<KVMeta>& meta) {
+    if (!cfg || !meta) {
+        return;
+    }
+    verifyKVMetaLayoutOnce();
+    meta->h2o_enable = cfg->kv_h2o_enable() ? 1 : 0;
+    meta->h2o_layer_start = ALIMAX(0, cfg->kv_h2o_layer_start());
+    meta->h2o_layer_end = cfg->kv_h2o_layer_end();
+    meta->h2o_block_tokens = ALIMAX(1, cfg->kv_h2o_block_tokens());
+    meta->h2o_sink_tokens = ALIMAX(0, cfg->kv_h2o_sink_tokens());
+    meta->h2o_recent_tokens = ALIMAX(0, cfg->kv_h2o_recent_tokens());
+    meta->h2o_target_keep_ratio = ALIMIN(1.0f, ALIMAX(0.0f, cfg->kv_h2o_target_keep_ratio()));
+    const auto targetMode = cfg->kv_h2o_target_mode();
+    meta->h2o_target_mode = (targetMode == "static") ? 0 : 1;
+    meta->h2o_target_lossy_ratio = ALIMAX(1.0f, cfg->kv_h2o_target_lossy_ratio());
+    meta->h2o_ema_alpha = ALIMIN(1.0f, ALIMAX(0.0f, cfg->kv_h2o_ema_alpha()));
+    meta->h2o_update_interval = ALIMAX(1, cfg->kv_h2o_update_interval());
+    meta->h2o_trigger_min_tokens = ALIMAX(1, cfg->kv_h2o_trigger_min_tokens());
+    meta->h2o_log_stats = cfg->kv_h2o_log_stats() ? 1 : 0;
+    meta->h2o_lossless_enable = cfg->kv_lossless_enable() ? 1 : 0;
+    const auto scope = cfg->kv_lossless_scope();
+    if (scope == "none") {
+        meta->h2o_lossless_scope = 0;
+    } else if (scope == "front_n_and_h2o_kept" || scope == "front_n+h2o_kept") {
+        meta->h2o_lossless_scope = 3;
+    } else if (scope == "h2o_kept") {
+        meta->h2o_lossless_scope = 2;
+    } else {
+        meta->h2o_lossless_scope = 1;
+    }
+    meta->h2o_lossless_front_n = ALIMAX(0, cfg->kv_lossless_front_n());
+    const auto codec = cfg->kv_lossless_codec();
+    meta->h2o_lossless_codec = (codec == "gear_delta") ? 1 : 0;
+    meta->h2o_lossless_runtime_enable = cfg->kv_lossless_runtime_enable() ? 1 : 0;
+    const auto runtimeMode = cfg->kv_lossless_runtime_mode();
+    if (runtimeMode == "full") {
+        meta->h2o_lossless_runtime_mode = 1;
+    } else if (runtimeMode == "store") {
+        meta->h2o_lossless_runtime_mode = 2;
+    } else {
+        meta->h2o_lossless_runtime_mode = 0;
+    }
+    meta->h2o_lossless_block_tokens = ALIMAX(1, cfg->kv_lossless_block_tokens());
+    meta->h2o_lossless_hot_recent_tokens = ALIMAX(0, cfg->kv_lossless_hot_recent_tokens());
+    meta->h2o_lossless_hot_sink_tokens = ALIMAX(0, cfg->kv_lossless_hot_sink_tokens());
+    meta->h2o_lossless_kept_sample_layers = ALIMAX(0, cfg->kv_lossless_kept_sample_layers());
+    meta->h2o_lossless_kept_sample_token_interval = ALIMAX(0, cfg->kv_lossless_kept_sample_token_interval());
+    meta->h2o_lossless_front_sample_token_interval = ALIMAX(0, cfg->kv_lossless_front_sample_token_interval());
+    meta->h2o_lossless_store_disable_front = cfg->kv_lossless_store_disable_front() ? 1 : 0;
+    meta->h2o_lossless_store_bootstrap_tokens = ALIMAX(0, cfg->kv_lossless_store_bootstrap_tokens());
+    meta->h2o_lossless_store_grouped_step_tokens = ALIMAX(0, cfg->kv_lossless_store_grouped_step_tokens());
+    meta->h2o_lossless_codec_runtime = cfg->kv_lossless_codec_runtime();
+    meta->h2o_lossless_predictors_k = cfg->kv_lossless_predictors_k();
+    meta->h2o_lossless_predictors_v = cfg->kv_lossless_predictors_v();
+    meta->h2o_lossless_async_threads = ALIMAX(0, cfg->kv_lossless_async_threads());
+    meta->h2o_lossless_max_queue = ALIMAX(1, cfg->kv_lossless_max_queue());
+    meta->h2o_lossless_decode_cache_blocks = ALIMAX(0, cfg->kv_lossless_decode_cache_blocks());
+    meta->h2o_lossless_strict_roundtrip_check = cfg->kv_lossless_strict_roundtrip_check() ? 1 : 0;
+    meta->h2o_in_decode = 0;
 }
 
 template <typename T>
@@ -120,6 +230,7 @@ bool Llm::set_config(const std::string& content) {
             mBlockSize = mValidBlockSize[mValidBlockSize.size()-1];
         } while (false);
     }
+    updateH2OMetaFromConfig(mConfig, mMeta);
     return res;
 }
 
@@ -443,11 +554,18 @@ void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve)
     mMeta->reserve = reserve;
     mMeta->n_reserve = n_reserve;
     mMeta->add = add;
+    // Explicit caller-provided cache edit has higher priority than pending H2O plan.
+    mMeta->h2o_pending_plan_ready = 0;
+    mMeta->h2o_pending_remove = 0;
+    mMeta->h2o_pending_reserve = nullptr;
+    mMeta->h2o_pending_n_reserve = 0;
+    mMeta->h2o_in_decode = 0;
 }
 
 std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs) {
     Express::VARP logitsIndex;
     bool inDecode = mContext->gen_seq_len > 0;
+    mMeta->h2o_in_decode = inDecode ? 1 : 0;
     bool isAllLogists = mConfig->all_logits() ? true : (inDecode ? mInSpec : false);
     auto seqLen = hiddenState->getInfo()->dim[mSeqLenIndex];
     int seqLenKey = inDecode ? hiddenState->getInfo()->dim[mSeqLenIndex] : mPrefillKey;
@@ -545,6 +663,28 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     }
 #endif
     mMeta->sync();
+    mContext->h2o_keep_ratio = mMeta->h2o_keep_ratio;
+    mContext->h2o_lossy_ratio = mMeta->h2o_lossy_ratio;
+    mContext->h2o_lossless_ratio = mMeta->h2o_lossless_ratio;
+    mContext->h2o_target_keep_effective = mMeta->h2o_target_keep_effective;
+    mContext->h2o_floor_keep_by_recent_sink = mMeta->h2o_floor_keep_by_recent_sink;
+    mContext->h2o_block_quantized_keep = mMeta->h2o_block_quantized_keep;
+    mContext->h2o_evict_us = mMeta->h2o_evict_us;
+    mContext->h2o_codec_us = mMeta->h2o_codec_us;
+    mContext->h2o_lossless_raw_bytes = mMeta->h2o_lossless_raw_bytes;
+    mContext->h2o_lossless_compressed_bytes = mMeta->h2o_lossless_compressed_bytes;
+    mContext->h2o_lossless_decompressed_bytes = mMeta->h2o_lossless_decompressed_bytes;
+    mContext->h2o_lossless_compress_us = mMeta->h2o_lossless_compress_us;
+    mContext->h2o_lossless_decompress_us = mMeta->h2o_lossless_decompress_us;
+    mContext->h2o_lossless_queue_depth_peak = mMeta->h2o_lossless_queue_depth_peak;
+    mContext->h2o_lossless_fallback_count = mMeta->h2o_lossless_fallback_count;
+    mContext->h2o_lossless_backpressure_skip_count = mMeta->h2o_lossless_backpressure_skip_count;
+    mContext->h2o_lossless_async_queue_peak = mMeta->h2o_lossless_async_queue_peak;
+    mContext->h2o_lossless_async_wait_us = mMeta->h2o_lossless_async_wait_us;
+    mContext->h2o_lossless_decode_cache_hit = mMeta->h2o_lossless_decode_cache_hit;
+    mContext->h2o_lossless_decode_cache_miss = mMeta->h2o_lossless_decode_cache_miss;
+    mContext->h2o_last_evict_tokens = mMeta->h2o_last_evict_tokens;
+    mContext->h2o_total_evict_tokens = mMeta->h2o_total_evict_tokens;
     return outputs;
 }
 
@@ -681,7 +821,55 @@ void Llm::reset() {
     mContext->pixels_mp = 0.0f;
     mContext->audio_us = 0;
     mContext->audio_input_s = 0.0f;
+    mContext->h2o_keep_ratio = 1.0f;
+    mContext->h2o_lossy_ratio = 1.0f;
+    mContext->h2o_lossless_ratio = 1.0f;
+    mContext->h2o_target_keep_effective = 1.0f;
+    mContext->h2o_floor_keep_by_recent_sink = 1.0f;
+    mContext->h2o_block_quantized_keep = 1.0f;
+    mContext->h2o_evict_us = 0;
+    mContext->h2o_codec_us = 0;
+    mContext->h2o_lossless_raw_bytes = 0;
+    mContext->h2o_lossless_compressed_bytes = 0;
+    mContext->h2o_lossless_decompressed_bytes = 0;
+    mContext->h2o_lossless_compress_us = 0;
+    mContext->h2o_lossless_decompress_us = 0;
+    mContext->h2o_lossless_queue_depth_peak = 0;
+    mContext->h2o_lossless_fallback_count = 0;
+    mContext->h2o_lossless_backpressure_skip_count = 0;
+    mContext->h2o_lossless_async_queue_peak = 0;
+    mContext->h2o_lossless_async_wait_us = 0;
+    mContext->h2o_lossless_decode_cache_hit = 0;
+    mContext->h2o_lossless_decode_cache_miss = 0;
+    mContext->h2o_last_evict_tokens = 0;
+    mContext->h2o_total_evict_tokens = 0;
     mMeta->remove = mMeta->previous;
+    mMeta->h2o_pending_plan_ready = 0;
+    mMeta->h2o_pending_remove = 0;
+    mMeta->h2o_pending_reserve = nullptr;
+    mMeta->h2o_pending_n_reserve = 0;
+    mMeta->h2o_keep_ratio = 1.0f;
+    mMeta->h2o_lossy_ratio = 1.0f;
+    mMeta->h2o_lossless_ratio = 1.0f;
+    mMeta->h2o_target_keep_effective = 1.0f;
+    mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
+    mMeta->h2o_block_quantized_keep = 1.0f;
+    mMeta->h2o_evict_us = 0;
+    mMeta->h2o_codec_us = 0;
+    mMeta->h2o_lossless_raw_bytes = 0;
+    mMeta->h2o_lossless_compressed_bytes = 0;
+    mMeta->h2o_lossless_decompressed_bytes = 0;
+    mMeta->h2o_lossless_compress_us = 0;
+    mMeta->h2o_lossless_decompress_us = 0;
+    mMeta->h2o_lossless_queue_depth_peak = 0;
+    mMeta->h2o_lossless_fallback_count = 0;
+    mMeta->h2o_lossless_backpressure_skip_count = 0;
+    mMeta->h2o_lossless_async_queue_peak = 0;
+    mMeta->h2o_lossless_async_wait_us = 0;
+    mMeta->h2o_lossless_decode_cache_hit = 0;
+    mMeta->h2o_lossless_decode_cache_miss = 0;
+    mMeta->h2o_last_evict_tokens = 0;
+    mMeta->h2o_total_evict_tokens = 0;
 }
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
@@ -703,6 +891,33 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mContext->all_seq_len = 0;
         mContext->history_tokens.clear();
         mMeta->remove = mMeta->previous;
+        mMeta->h2o_pending_plan_ready = 0;
+        mMeta->h2o_pending_remove = 0;
+        mMeta->h2o_pending_reserve = nullptr;
+        mMeta->h2o_pending_n_reserve = 0;
+        mMeta->h2o_in_decode = 0;
+        mMeta->h2o_keep_ratio = 1.0f;
+        mMeta->h2o_lossy_ratio = 1.0f;
+        mMeta->h2o_lossless_ratio = 1.0f;
+        mMeta->h2o_target_keep_effective = 1.0f;
+        mMeta->h2o_floor_keep_by_recent_sink = 1.0f;
+        mMeta->h2o_block_quantized_keep = 1.0f;
+        mMeta->h2o_evict_us = 0;
+        mMeta->h2o_codec_us = 0;
+        mMeta->h2o_lossless_raw_bytes = 0;
+        mMeta->h2o_lossless_compressed_bytes = 0;
+        mMeta->h2o_lossless_decompressed_bytes = 0;
+        mMeta->h2o_lossless_compress_us = 0;
+        mMeta->h2o_lossless_decompress_us = 0;
+        mMeta->h2o_lossless_queue_depth_peak = 0;
+        mMeta->h2o_lossless_fallback_count = 0;
+        mMeta->h2o_lossless_backpressure_skip_count = 0;
+        mMeta->h2o_lossless_async_queue_peak = 0;
+        mMeta->h2o_lossless_async_wait_us = 0;
+        mMeta->h2o_lossless_decode_cache_hit = 0;
+        mMeta->h2o_lossless_decode_cache_miss = 0;
+        mMeta->h2o_last_evict_tokens = 0;
+        mMeta->h2o_total_evict_tokens = 0;
     }
     mContext->output_tokens.clear();
 }
@@ -931,6 +1146,7 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     mContext.reset(new LlmContext);
     mMeta.reset(new KVMeta);
     mMeta->layer_nums = mConfig->layer_nums();
+    updateH2OMetaFromConfig(mConfig, mMeta);
     mGenerateParam.reset(new GenerationParams);
 }
 

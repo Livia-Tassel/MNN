@@ -1,0 +1,66 @@
+You are an analyst. Read the dossier and produce the requested outputs.
+
+Dossier (incident analysis):
+A small SaaS team runs an API. Over the last week, customers reported occasional timeouts. The team collected observations:
+
+- API gateway timeout: 2.0 seconds (hard limit).
+- Service A p95 latency: 1.1s on Monday, 1.3s on Tuesday, 1.9s on Wednesday.
+- Service A p99 latency: 1.8s on Monday, 1.9s on Tuesday, 3.2s on Wednesday.
+- Retries: client retries up to 2 times with exponential backoff (200ms, then 400ms).
+- Database CPU: 35% Monday, 30% Tuesday, 22% Wednesday.
+- Packet loss (egress): 0.1% Monday, 0.2% Tuesday, 1.5% Wednesday.
+- Error logs (Wednesday excerpt):
+  10:02:11Z WARN upstream reset before headers
+  10:02:12Z INFO retrying request id=7f3a attempt=2
+  10:02:13Z WARN connect timeout to db-read-replica
+  10:02:14Z INFO fallback to primary
+  10:02:14Z WARN request exceeded deadline 2.0s
+
+Constraints:
+- You cannot increase the gateway timeout beyond 2.0s this week.
+- You can deploy at most one change today.
+- You need an explanation that a non-expert PM can understand.
+
+Tasks:
+A) Provide the most plausible causal chain (use arrows).
+B) List the top 3 hypotheses, ranked, with one piece of evidence for each.
+C) Recommend ONE deployable change today, and explain why it’s the best first move.
+D) Provide a short PM-friendly summary (≤ 80 words).
+
+Output format (exact keys):
+causal_chain:
+hypotheses:
+change_today:
+pm_summary:
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Assume you cannot run code and must reason from the text only.
+
+Do not repeat the prompt; produce only the deliverables.
+
+When extracting, do not infer fields that are not explicitly present.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+If you make an assumption, state it explicitly before using it.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+If you make an assumption, state it explicitly before using it.
+
+Assume you cannot run code and must reason from the text only.
+
+Use units consistently and show intermediate calculations when asked.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Use units consistently and show intermediate calculations when asked.
+
+Use units consistently and show intermediate calculations when asked.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.

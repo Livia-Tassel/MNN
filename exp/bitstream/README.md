@@ -1,0 +1,161 @@
+# Bitstream Lossless (Huffman + Arithmetic)
+
+This folder implements **bit‑level lossless encoding** for FP16 KV dumps.
+It is **pure lossless** and reuses existing FP16 dumps.
+
+## Dependencies
+- Python 3
+- `numpy`
+
+```bash
+pip install numpy
+```
+
+## Inputs
+Reuse existing FP16 dumps from `exp/gear_fp16`:
+```
+exp/gear_fp16/dumps_fp16/<run_id>/
+```
+
+## Huffman Encode
+```bash
+python3 exp/bitstream/encode_huffman.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1 \
+  --stage both \
+  --codebook global
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.huff`, `k_lo10_<meta>.huff`
+- `v_hi6_<meta>.huff`, `v_lo10_<meta>.huff`
+- `bitstream_meta_<meta>.json`
+Global outputs:
+- `global_codebook.json`
+
+## Huffman Decode + Verify
+```bash
+python3 exp/bitstream/decode_huffman.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1 \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## Huffman Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_huffman.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1 \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1 \
+  --include-meta
+```
+
+## Arithmetic Encode
+```bash
+python3 exp/bitstream/encode_arith.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_arith \
+  --stage both \
+  --codebook global
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.ac`, `k_lo10_<meta>.ac`
+- `v_hi6_<meta>.ac`, `v_lo10_<meta>.ac`
+- `arith_meta_<meta>.json`
+Global outputs:
+- `global_codebook_arith.json`
+
+## Arithmetic Decode + Verify
+```bash
+python3 exp/bitstream/decode_arith.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_arith \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## Arithmetic Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_arith.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_arith \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_arith \
+  --include-meta
+```
+
+## rANS Context Encode (hi6 delta + lo10 context)
+```bash
+python3 exp/bitstream/encode_rans_ctx.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --stage both \
+  --buckets 4096 \
+  --hash-a 131 \
+  --hash-b 17
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.rans`, `k_lo10_<meta>.rans`
+- `v_hi6_<meta>.rans`, `v_lo10_<meta>.rans`
+- `rans_<meta>.json`
+Codebooks (per group):
+- `codebook_k_prefill.json`, `codebook_k_decode.json`
+- `codebook_v_prefill.json`, `codebook_v_decode.json`
+
+## rANS Context Decode + Verify
+```bash
+python3 exp/bitstream/decode_rans_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## rANS Context Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_rans_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_rans \
+  --include-meta
+```
+
+## CABAC Context Encode (hi6 delta + lo10 context, adaptive)
+```bash
+python3 exp/bitstream/encode_cabac_ctx.py \
+  --dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --stage both \
+  --hi6-buckets 512 \
+  --lo10-buckets 16384 \
+  --hash-a 131 --hash-b 17 --hash-c 257 --hash-d 31 \
+  --prefix-bits 3
+```
+
+Outputs (per dump):
+- `k_hi6_<meta>.cabac`, `k_lo10_<meta>.cabac`
+- `v_hi6_<meta>.cabac`, `v_lo10_<meta>.cabac`
+- `cabac_<meta>.json`
+Codebooks (per group):
+- `cabac_codebook_k_prefill.json`, `cabac_codebook_k_decode.json`
+- `cabac_codebook_v_prefill.json`, `cabac_codebook_v_decode.json`
+
+## CABAC Context Decode + Verify
+```bash
+python3 exp/bitstream/decode_cabac_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --verify
+```
+
+## CABAC Context Analyze Ratios
+```bash
+python3 exp/bitstream/analyze_cabac_ctx.py \
+  --bitstream-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --orig-dump-dir exp/gear_fp16/dumps_fp16/demo_20260205_102843_prompt_128_1 \
+  --out-dir exp/bitstream/out/demo_20260205_102843_prompt_128_1_cabac \
+  --include-meta
+```
+
+## Notes
+- Encoding splits FP16 into `hi6` (sign+exp) and `lo10` (mantissa).
+- `global` codebook mode is recommended to keep metadata overhead low.

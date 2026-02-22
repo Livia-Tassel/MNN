@@ -1,0 +1,101 @@
+You are a meeting-notes assistant.
+
+Transcript excerpt:
+- Alice: “We should ship the new onboarding on March 3.”
+- Ben: “QA needs at least 4 business days.”
+- Chen: “Legal review is pending; we might not have approval until March 2.”
+- Alice: “If legal slips, we can launch without the referral banner.”
+- Ben: “Also, metrics dashboard is missing event `signup_completed`.”
+- Chen: “I’ll ask legal for an ETA by tomorrow.”
+
+Tasks:
+1) Produce a clean summary (≤ 120 words).
+2) List action items (owner + due date if mentioned).
+3) List decisions made.
+4) List open questions.
+
+Output format:
+summary:
+action_items:
+decisions:
+open_questions:
+
+If there are multiple valid options, choose one and proceed.
+
+If something is missing, leave it blank rather than guessing.
+
+Use clear headings and bullet points where appropriate.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not include any extra commentary outside the deliverables.
+
+Follow the requested output format strictly.
+
+Use consistent tense and tone throughout the output.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Preserve all proper nouns and numbers exactly as written.
+
+If there are multiple valid options, choose one and proceed.
+
+Do not repeat the input verbatim unless asked.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Follow the requested output format strictly.
+
+If something is missing, leave it blank rather than guessing.
+
+Do not repeat the input verbatim unless asked.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use consistent tense and tone throughout the output.
+
+Use clear headings and bullet points where appropriate.
+
+Follow the requested output format strictly.
+
+If there are multiple valid options, choose one and proceed.
+
+If there are multiple valid options, choose one and proceed.
+
+Use consistent tense and tone throughout the output.
+
+Do not repeat the input verbatim unless asked.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not include any extra commentary outside the deliverables.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Follow the requested output format strictly.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Preserve all proper nouns and numbers exactly as written.
+
+Do not include any extra commentary outside the deliverables.
+
+If there are multiple valid options, choose one and proceed.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Do not repeat the input verbatim unless asked.
+
+If something is missing, leave it blank rather than guessing.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.
+
+Use consistent tense and tone throughout the output.

@@ -10,6 +10,9 @@
 
 #include "CPUKVCacheManager.hpp"
 #include "core/Concurrency.h"
+#if defined(MNN_EXP_KV_DUMP)
+#include "../../../exp/distribution/kv_dump.hpp"
+#endif
 
 namespace MNN {
 
@@ -448,7 +451,35 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
 }
 
 void CPUKVCacheManager::onRealloc(KVMeta* meta) {
-    auto kv_seq_len = meta->previous + meta->add - meta->remove + meta->computeReverseSize();
+    if (meta == nullptr) {
+        return;
+    }
+    // NOTE:
+    // KVMeta::previous is shared across all attention layers in one forward,
+    // while each CPUKVCacheManager instance owns a per-layer mPastLength.
+    // Under H2O per-layer compaction, mPastLength can temporarily diverge from
+    // shared previous. Realloc safety checks and target length should always
+    // use the per-layer real length.
+    const size_t baseSeqLen = static_cast<size_t>(ALIMAX(0, mPastLength)) + meta->add;
+    if (meta->remove > baseSeqLen) {
+        MNN_ERROR("Invalid KV realloc meta: remove=%zu exceeds previous+add=%zu, clamp.\n",
+                  meta->remove, baseSeqLen);
+        meta->remove = baseSeqLen;
+        // Reserve ranges are expressed against the removed window. Once remove
+        // is clamped, the original reserve plan no longer matches and must be
+        // dropped to avoid invalid move ranges.
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
+    }
+    int reserveSize = meta->computeReserveSize();
+    if (reserveSize < 0) {
+        MNN_ERROR("Invalid KV reserve plan: n_reserve=%d reserve_ptr=%p. Disable reserve compaction for this step.\n",
+                  meta->n_reserve, meta->reserve);
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
+        reserveSize = 0;
+    }
+    auto kv_seq_len = baseSeqLen - meta->remove + static_cast<size_t>(reserveSize);
     if (kv_seq_len > mMaxLength) {
         // Realloc
         int oldMaxLength = mMaxLength;
@@ -507,23 +538,52 @@ void CPUKVCacheManager::onRealloc(KVMeta* meta) {
         }
     }
     // Remove
-    auto start = mPastLength - meta->remove;
-    if (0 == meta->n_reserve || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
+    int start = mPastLength - static_cast<int>(meta->remove);
+    if (start < 0) {
+        MNN_ERROR("Invalid KV realloc start: past=%d remove=%zu, clamp remove to past length.\n",
+                  mPastLength, meta->remove);
+        meta->remove = static_cast<size_t>(mPastLength);
+        meta->n_reserve = 0;
+        meta->reserve = nullptr;
+        start = 0;
+    }
+    if (0 == meta->n_reserve || meta->reserve == nullptr || mQuantKey || mQuantValue) { // n_reserve > 0 is not currently supported when K or V is quantized.
         mPastLength = start;
         return;
     }
 #if 1
     auto dstIndex = start;
+    int64_t lastSrcEnd = start;
     for (int n = 0; n < meta->n_reserve; ++n) {
         auto begin = meta->reserve[2 * n];
         auto size  = meta->reserve[2 * n + 1];
-        auto srcIndex = start + begin;
+        const int64_t srcIndex64 = static_cast<int64_t>(start) + static_cast<int64_t>(begin);
+        const int64_t srcEnd64 = srcIndex64 + static_cast<int64_t>(size);
+        const int64_t removeBound64 = static_cast<int64_t>(meta->remove);
+        if (begin < 0
+            || size <= 0
+            || srcIndex64 < static_cast<int64_t>(start)
+            || srcEnd64 < srcIndex64
+            || srcEnd64 > static_cast<int64_t>(mPastLength)
+            || static_cast<int64_t>(begin) + static_cast<int64_t>(size) > removeBound64
+            || srcIndex64 < lastSrcEnd) {
+            MNN_ERROR("Invalid KV reserve range[%d]: begin=%d size=%d start=%d past=%d remove=%zu. Fallback to tail-trim only.\n",
+                      n, begin, size, start, mPastLength, meta->remove);
+            // Keep KV/meta consistent: apply plain tail-trim (drop removed tail),
+            // then clear reserve so KVMeta::sync computes the same resulting length.
+            mPastLength = start;
+            meta->n_reserve = 0;
+            meta->reserve = nullptr;
+            return;
+        }
+        const int srcIndex = static_cast<int>(srcIndex64);
         if (mBytes == 2) {
             moveKV<FLOAT16_T>(srcIndex, dstIndex, size);
         } else {
             moveKV<float>(srcIndex, dstIndex, size);
         }
         dstIndex += size;
+        lastSrcEnd = srcEnd64;
     }
     mPastLength = dstIndex;
 #else
@@ -747,10 +807,16 @@ size_t CPUKVCacheManager::keyIndex(int seq, int dim) const {
 }
 
 size_t CPUKVCacheManager::valueIndex(int seq, int dim) const {
-    return (dim / hP) * ROUND_UP(mMaxLength, lP) * hP +
-           (seq / lP) * hP * lP +
-           (dim % hP) * lP +
-           (seq % lP);
+    const int FA = static_cast<int>(mFlashAttentionUpperKv);
+    const size_t stride2 = static_cast<size_t>(lP) * static_cast<size_t>(hP);
+    const size_t stride1 = static_cast<size_t>(UP_DIV(FA, lP)) * stride2;
+    const size_t stride0 = stride1 * static_cast<size_t>(UP_DIV(mHeadDim, hP));
+    const int seqInBlock = seq % FA;
+    return static_cast<size_t>(seq / FA) * stride0
+         + static_cast<size_t>(dim / hP) * stride1
+         + static_cast<size_t>(seqInBlock / lP) * stride2
+         + static_cast<size_t>(dim % hP) * static_cast<size_t>(lP)
+         + static_cast<size_t>(seqInBlock % lP);
 }
 
 template <typename T>
@@ -768,6 +834,20 @@ void CPUKVCacheManager::moveKV(int src, int dst, int size) {
 }
 
 void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int add) {
+#if defined(MNN_EXP_KV_DUMP)
+    KVExp::DumpKVIfEnabled(this,
+                           key,
+                           value,
+                           add,
+                           mKvNumHead,
+                           mHeadDim,
+                           mBytes,
+                           mPastLength,
+                           mQuantKey,
+                           mQuantValue,
+                           mUseFlashAttention,
+                           mMeta);
+#endif
     auto core = static_cast<CPUBackend*>(mBackend)->functions();
     int seq_len = add;
     auto divPart = UP_DIV(mKvNumHead, 1);
@@ -789,6 +869,25 @@ void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int
         }
     } MNN_CONCURRENCY_END();
     mPastLength += seq_len;
+#if defined(MNN_EXP_KV_DUMP)
+    KVExp::DumpPackedKVIfEnabled(this,
+                                 reinterpret_cast<const uint8_t*>(addrOfKey(0)),
+                                 reinterpret_cast<const uint8_t*>(addrOfValue(0)),
+                                 add,
+                                 mKvNumHead,
+                                 mHeadDim,
+                                 mBytes,
+                                 mPastLength,
+                                 mMaxLength,
+                                 hP,
+                                 lP,
+                                 static_cast<int>(mFlashAttentionUpperKv),
+                                 mCurrentKeySizePerHead,
+                                 mCurrentValueSizePerHead,
+                                 mQuantKey,
+                                 mQuantValue,
+                                 mMeta);
+#endif
 }
 
 } // namespace MNN

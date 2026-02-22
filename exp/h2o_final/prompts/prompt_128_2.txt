@@ -1,0 +1,22 @@
+You are a writing assistant.
+
+Task: Rewrite the message below into a polite, concise email (2–3 sentences). Keep all facts.
+
+Message:
+“Hi, I can’t make the meeting tomorrow morning because I have a medical appointment. Can we move it to Thursday afternoon instead?”
+
+Output: email body only.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Avoid unnecessary verbosity; keep it readable.
+
+Use clear headings and bullet points where appropriate.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+Do not include any extra commentary outside the deliverables.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.
+
+When rewriting, keep meaning unchanged unless asked to adapt tone.

@@ -173,8 +173,28 @@ struct TestInstance {
     int                      nGenerate;
     std::vector<int64_t>     prefillUs;
     std::vector<int64_t>     decodeUs;
+    std::vector<int>         decodeTokensActual;
     std::vector<int64_t>     samplesUs;
     std::vector<double>      loadingS;
+    std::vector<double>      h2oKeep;
+    std::vector<double>      h2oLossy;
+    std::vector<double>      h2oLossless;
+    std::vector<double>      h2oTargetKeepEffective;
+    std::vector<double>      h2oFloorKeep;
+    std::vector<double>      h2oQuantizedKeep;
+    std::vector<double>      h2oEvictUs;
+    std::vector<double>      h2oCodecUs;
+    std::vector<double>      h2oLosslessRawMB;
+    std::vector<double>      h2oLosslessCompMB;
+    std::vector<double>      h2oLosslessCompUs;
+    std::vector<double>      h2oLosslessDecompUs;
+    std::vector<double>      h2oLosslessQueuePeak;
+    std::vector<double>      h2oLosslessFallback;
+    std::vector<double>      h2oLosslessBackpressureSkip;
+    std::vector<double>      h2oLosslessAsyncQueuePeak;
+    std::vector<double>      h2oLosslessAsyncWaitUs;
+    std::vector<double>      h2oLosslessDecodeCacheHit;
+    std::vector<double>      h2oLosslessDecodeCacheMiss;
     int                      backend;
     int                      precision;
     int                      power;
@@ -207,6 +227,21 @@ struct TestInstance {
         return ts;
     }
 
+    std::vector<double> getTokensPerSecond(const std::vector<int>& tokens, const std::vector<int64_t>& cost_us, int fallback_tokens = 0) const {
+        std::vector<double> ts;
+        const size_t n = std::min(tokens.size(), cost_us.size());
+        ts.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            const int token_count = tokens[i] > 0 ? tokens[i] : fallback_tokens;
+            const int64_t t = cost_us[i];
+            if (token_count <= 0 || t <= 0) {
+                continue;
+            }
+            ts.emplace_back(1e6 * static_cast<double>(token_count) / static_cast<double>(t));
+        }
+        return ts;
+    }
+
     double getAvgUs(std::vector<double> v) const { return ::avg(v); }
     double getStdevUs(std::vector<double> v) const { return ::stdev(v); }
     enum fieldType { STRING, BOOL, INT, FLOAT };
@@ -218,7 +253,26 @@ struct TestInstance {
         if (field == "useMmap") {
             return BOOL;
         }
-        if (field == "t/s" || field == "modelSize" || field == "prefill&decode speed (tok/s)") {
+        if (field == "t/s" || field == "modelSize" || field == "prefill&decode speed (tok/s)"
+            || field == "h2o_keep"
+            || field == "h2o_lossy"
+            || field == "h2o_lossless"
+            || field == "h2o_target_keep_effective"
+            || field == "h2o_floor_keep"
+            || field == "h2o_quantized_keep"
+            || field == "h2o_evict_us"
+            || field == "h2o_codec_us"
+            || field == "h2o_lossless_raw_mb"
+            || field == "h2o_lossless_comp_mb"
+            || field == "h2o_lossless_comp_us"
+            || field == "h2o_lossless_decomp_us"
+            || field == "h2o_lossless_queue_peak"
+            || field == "h2o_lossless_fallback"
+            || field == "h2o_lossless_backpressure_skip"
+            || field == "h2o_lossless_async_queue_peak"
+            || field == "h2o_lossless_async_wait_us"
+            || field == "h2o_lossless_decode_cache_hit"
+            || field == "h2o_lossless_decode_cache_miss") {
             return FLOAT;
         }
         return STRING;
@@ -337,6 +391,25 @@ struct markdownPrinter : public Printer {
         } else {
             fields.emplace_back("llm_demo");
             fields.emplace_back("speed(tok/s)");
+            fields.emplace_back("h2o_keep");
+            fields.emplace_back("h2o_lossy");
+            fields.emplace_back("h2o_lossless");
+            fields.emplace_back("h2o_target_keep_effective");
+            fields.emplace_back("h2o_floor_keep");
+            fields.emplace_back("h2o_quantized_keep");
+            fields.emplace_back("h2o_evict_us");
+            fields.emplace_back("h2o_codec_us");
+            fields.emplace_back("h2o_lossless_raw_mb");
+            fields.emplace_back("h2o_lossless_comp_mb");
+            fields.emplace_back("h2o_lossless_comp_us");
+            fields.emplace_back("h2o_lossless_decomp_us");
+            fields.emplace_back("h2o_lossless_queue_peak");
+            fields.emplace_back("h2o_lossless_fallback");
+            fields.emplace_back("h2o_lossless_backpressure_skip");
+            fields.emplace_back("h2o_lossless_async_queue_peak");
+            fields.emplace_back("h2o_lossless_async_wait_us");
+            fields.emplace_back("h2o_lossless_decode_cache_hit");
+            fields.emplace_back("h2o_lossless_decode_cache_miss");
         }
         if (tp.loadTime == "true") {
             fields.emplace_back("loadingTime(s)");
@@ -391,8 +464,71 @@ struct markdownPrinter : public Printer {
                 value = buf;
             } else if (field == "speed(tok/s)") {
                 auto decode_speed = t.getTokensPerSecond(t.nGenerate, t.decodeUs);
+                if (!t.decodeTokensActual.empty()) {
+                    auto decode_speed_actual = t.getTokensPerSecond(t.decodeTokensActual, t.decodeUs, t.nGenerate);
+                    if (!decode_speed_actual.empty()) {
+                        decode_speed = std::move(decode_speed_actual);
+                    }
+                }
                 auto prefill_speed = t.getTokensPerSecond(t.nPrompt, t.prefillUs);
                 snprintf(buf, sizeof(buf), "%.2f ± %.2f<br>%.2f ± %.2f", t.getAvgUs(prefill_speed), t.getStdevUs(prefill_speed), t.getAvgUs(decode_speed), t.getStdevUs(decode_speed));
+                value = buf;
+            } else if (field == "h2o_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oKeep), t.getStdevUs(t.h2oKeep));
+                value = buf;
+            } else if (field == "h2o_lossy") {
+                snprintf(buf, sizeof(buf), "%.3f ± %.3f", t.getAvgUs(t.h2oLossy), t.getStdevUs(t.h2oLossy));
+                value = buf;
+            } else if (field == "h2o_lossless") {
+                snprintf(buf, sizeof(buf), "%.3f ± %.3f", t.getAvgUs(t.h2oLossless), t.getStdevUs(t.h2oLossless));
+                value = buf;
+            } else if (field == "h2o_target_keep_effective") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oTargetKeepEffective), t.getStdevUs(t.h2oTargetKeepEffective));
+                value = buf;
+            } else if (field == "h2o_floor_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oFloorKeep), t.getStdevUs(t.h2oFloorKeep));
+                value = buf;
+            } else if (field == "h2o_quantized_keep") {
+                snprintf(buf, sizeof(buf), "%.4f ± %.4f", t.getAvgUs(t.h2oQuantizedKeep), t.getStdevUs(t.h2oQuantizedKeep));
+                value = buf;
+            } else if (field == "h2o_evict_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oEvictUs), t.getStdevUs(t.h2oEvictUs));
+                value = buf;
+            } else if (field == "h2o_codec_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oCodecUs), t.getStdevUs(t.h2oCodecUs));
+                value = buf;
+            } else if (field == "h2o_lossless_raw_mb") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessRawMB), t.getStdevUs(t.h2oLosslessRawMB));
+                value = buf;
+            } else if (field == "h2o_lossless_comp_mb") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessCompMB), t.getStdevUs(t.h2oLosslessCompMB));
+                value = buf;
+            } else if (field == "h2o_lossless_comp_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessCompUs), t.getStdevUs(t.h2oLosslessCompUs));
+                value = buf;
+            } else if (field == "h2o_lossless_decomp_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecompUs), t.getStdevUs(t.h2oLosslessDecompUs));
+                value = buf;
+            } else if (field == "h2o_lossless_queue_peak") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessQueuePeak), t.getStdevUs(t.h2oLosslessQueuePeak));
+                value = buf;
+            } else if (field == "h2o_lossless_fallback") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessFallback), t.getStdevUs(t.h2oLosslessFallback));
+                value = buf;
+            } else if (field == "h2o_lossless_backpressure_skip") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessBackpressureSkip), t.getStdevUs(t.h2oLosslessBackpressureSkip));
+                value = buf;
+            } else if (field == "h2o_lossless_async_queue_peak") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessAsyncQueuePeak), t.getStdevUs(t.h2oLosslessAsyncQueuePeak));
+                value = buf;
+            } else if (field == "h2o_lossless_async_wait_us") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessAsyncWaitUs), t.getStdevUs(t.h2oLosslessAsyncWaitUs));
+                value = buf;
+            } else if (field == "h2o_lossless_decode_cache_hit") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecodeCacheHit), t.getStdevUs(t.h2oLosslessDecodeCacheHit));
+                value = buf;
+            } else if (field == "h2o_lossless_decode_cache_miss") {
+                snprintf(buf, sizeof(buf), "%.2f ± %.2f", t.getAvgUs(t.h2oLosslessDecodeCacheMiss), t.getStdevUs(t.h2oLosslessDecodeCacheMiss));
                 value = buf;
             } else if (field == "precision") {
                 if (t.precision == 2) value = "Low";
@@ -530,6 +666,12 @@ struct jsonAggregator : public Printer {
                 std::vector<double> speed;
                 if (!inst.decodeUs.empty()) {
                     speed = inst.getTokensPerSecond(inst.nGenerate, inst.decodeUs);
+                    if (!inst.decodeTokensActual.empty()) {
+                        auto speed_actual = inst.getTokensPerSecond(inst.decodeTokensActual, inst.decodeUs, inst.nGenerate);
+                        if (!speed_actual.empty()) {
+                            speed = std::move(speed_actual);
+                        }
+                    }
                 } else if (!inst.samplesUs.empty()) {
                     speed = inst.getTokensPerSecond(inst.nGenerate, inst.samplesUs);
                 }
@@ -559,6 +701,12 @@ struct jsonAggregator : public Printer {
                 }
                 if (!inst.decodeUs.empty()) {
                     auto decode_speed = inst.getTokensPerSecond(inst.nGenerate, inst.decodeUs);
+                    if (!inst.decodeTokensActual.empty()) {
+                        auto decode_speed_actual = inst.getTokensPerSecond(inst.decodeTokensActual, inst.decodeUs, inst.nGenerate);
+                        if (!decode_speed_actual.empty()) {
+                            decode_speed = std::move(decode_speed_actual);
+                        }
+                    }
                     writer.Key("decode_tps");
                     writer.Double(inst.getAvgUs(decode_speed));
                     writer.Key("decode_std");
@@ -572,6 +720,120 @@ struct jsonAggregator : public Printer {
                 writer.Double(inst.getAvgUs(inst.loadingS));
                 writer.Key("loading_time_std");
                 writer.Double(inst.getStdevUs(inst.loadingS));
+            }
+            if (!inst.h2oKeep.empty()) {
+                writer.Key("h2o_keep_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oKeep));
+                writer.Key("h2o_keep_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oKeep));
+            }
+            if (!inst.h2oLossy.empty()) {
+                writer.Key("h2o_lossy_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oLossy));
+                writer.Key("h2o_lossy_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oLossy));
+            }
+            if (!inst.h2oLossless.empty()) {
+                writer.Key("h2o_lossless_ratio");
+                writer.Double(inst.getAvgUs(inst.h2oLossless));
+                writer.Key("h2o_lossless_ratio_std");
+                writer.Double(inst.getStdevUs(inst.h2oLossless));
+            }
+            if (!inst.h2oTargetKeepEffective.empty()) {
+                writer.Key("h2o_target_keep_effective");
+                writer.Double(inst.getAvgUs(inst.h2oTargetKeepEffective));
+                writer.Key("h2o_target_keep_effective_std");
+                writer.Double(inst.getStdevUs(inst.h2oTargetKeepEffective));
+            }
+            if (!inst.h2oFloorKeep.empty()) {
+                writer.Key("h2o_floor_keep");
+                writer.Double(inst.getAvgUs(inst.h2oFloorKeep));
+                writer.Key("h2o_floor_keep_std");
+                writer.Double(inst.getStdevUs(inst.h2oFloorKeep));
+            }
+            if (!inst.h2oQuantizedKeep.empty()) {
+                writer.Key("h2o_quantized_keep");
+                writer.Double(inst.getAvgUs(inst.h2oQuantizedKeep));
+                writer.Key("h2o_quantized_keep_std");
+                writer.Double(inst.getStdevUs(inst.h2oQuantizedKeep));
+            }
+            if (!inst.h2oEvictUs.empty()) {
+                writer.Key("h2o_evict_us");
+                writer.Double(inst.getAvgUs(inst.h2oEvictUs));
+                writer.Key("h2o_evict_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oEvictUs));
+            }
+            if (!inst.h2oCodecUs.empty()) {
+                writer.Key("h2o_codec_us");
+                writer.Double(inst.getAvgUs(inst.h2oCodecUs));
+                writer.Key("h2o_codec_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oCodecUs));
+            }
+            if (!inst.h2oLosslessRawMB.empty()) {
+                writer.Key("h2o_lossless_raw_mb");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessRawMB));
+                writer.Key("h2o_lossless_raw_mb_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessRawMB));
+            }
+            if (!inst.h2oLosslessCompMB.empty()) {
+                writer.Key("h2o_lossless_comp_mb");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessCompMB));
+                writer.Key("h2o_lossless_comp_mb_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessCompMB));
+            }
+            if (!inst.h2oLosslessCompUs.empty()) {
+                writer.Key("h2o_lossless_comp_us");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessCompUs));
+                writer.Key("h2o_lossless_comp_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessCompUs));
+            }
+            if (!inst.h2oLosslessDecompUs.empty()) {
+                writer.Key("h2o_lossless_decomp_us");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessDecompUs));
+                writer.Key("h2o_lossless_decomp_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessDecompUs));
+            }
+            if (!inst.h2oLosslessQueuePeak.empty()) {
+                writer.Key("h2o_lossless_queue_peak");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessQueuePeak));
+                writer.Key("h2o_lossless_queue_peak_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessQueuePeak));
+            }
+            if (!inst.h2oLosslessFallback.empty()) {
+                writer.Key("h2o_lossless_fallback");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessFallback));
+                writer.Key("h2o_lossless_fallback_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessFallback));
+            }
+            if (!inst.h2oLosslessBackpressureSkip.empty()) {
+                writer.Key("h2o_lossless_backpressure_skip");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessBackpressureSkip));
+                writer.Key("h2o_lossless_backpressure_skip_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessBackpressureSkip));
+            }
+            if (!inst.h2oLosslessAsyncQueuePeak.empty()) {
+                writer.Key("h2o_lossless_async_queue_peak");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessAsyncQueuePeak));
+                writer.Key("h2o_lossless_async_queue_peak_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessAsyncQueuePeak));
+            }
+            if (!inst.h2oLosslessAsyncWaitUs.empty()) {
+                writer.Key("h2o_lossless_async_wait_us");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessAsyncWaitUs));
+                writer.Key("h2o_lossless_async_wait_us_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessAsyncWaitUs));
+            }
+            if (!inst.h2oLosslessDecodeCacheHit.empty()) {
+                writer.Key("h2o_lossless_decode_cache_hit");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessDecodeCacheHit));
+                writer.Key("h2o_lossless_decode_cache_hit_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessDecodeCacheHit));
+            }
+            if (!inst.h2oLosslessDecodeCacheMiss.empty()) {
+                writer.Key("h2o_lossless_decode_cache_miss");
+                writer.Double(inst.getAvgUs(inst.h2oLosslessDecodeCacheMiss));
+                writer.Key("h2o_lossless_decode_cache_miss_std");
+                writer.Double(inst.getStdevUs(inst.h2oLosslessDecodeCacheMiss));
             }
 
             writer.EndObject();
@@ -762,17 +1024,44 @@ static std::vector<commandParametersInstance> get_cmd_params_instances(const Run
     return instances;
 }
 
+static bool isAbsolutePath(const std::string& path) {
+#if defined(WIN32) || defined(_WIN32) || defined(_WIN64) || defined(_MSC_VER)
+    if (path.size() >= 3 && path[1] == ':' && (path[2] == '/' || path[2] == '\\')) {
+        return true;
+    }
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
+        return true;
+    }
+#endif
+    return !path.empty() && (path[0] == '/' || path[0] == '\\');
+}
+
+static std::string trimTrailingSlash(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+    size_t end = path.size();
+    while (end > 0 && (path[end - 1] == '/' || path[end - 1] == '\\')) {
+        --end;
+    }
+    return path.substr(0, end);
+}
+
 std::string getDirectoryOf(const std::string& file_path, std::string& modelname) {
-    // weight filename
     std::string weight_name = "llm.mnn.weight";
+    std::string base_dir;
     std::ifstream file(file_path.c_str());
     std::string json_str((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
     rapidjson::Document doc;
     doc.Parse(json_str.c_str());
-
-    if (doc.HasMember("llm_weight") && doc["llm_weight"].IsString()) {
-        weight_name = doc["llm_weight"].GetString();
+    if (!doc.HasParseError()) {
+        if (doc.HasMember("llm_weight") && doc["llm_weight"].IsString()) {
+            weight_name = doc["llm_weight"].GetString();
+        }
+        if (doc.HasMember("base_dir") && doc["base_dir"].IsString()) {
+            base_dir = doc["base_dir"].GetString();
+        }
     }
 
     size_t pos = file_path.find_last_of("/\\");
@@ -780,10 +1069,23 @@ std::string getDirectoryOf(const std::string& file_path, std::string& modelname)
         MNN_ERROR("Invalid model config path\n");
         return "";
     }
-    auto dir = file_path.substr(0, pos);
-    pos = dir.find_last_of("/\\");
-    modelname = dir.substr(pos + 1, -1);
-    return MNNFilePathConcat(dir, weight_name);
+    const auto config_dir = file_path.substr(0, pos);
+    const auto path_for_name = trimTrailingSlash(base_dir.empty() ? config_dir : base_dir);
+    if (path_for_name.empty()) {
+        modelname = "";
+    } else {
+        pos = path_for_name.find_last_of("/\\");
+        modelname = (pos == std::string::npos) ? path_for_name : path_for_name.substr(pos + 1);
+    }
+
+    if (isAbsolutePath(weight_name)) {
+        return weight_name;
+    }
+    const auto root = trimTrailingSlash(base_dir.empty() ? config_dir : base_dir);
+    if (root.empty()) {
+        return weight_name;
+    }
+    return MNNFilePathConcat(root, weight_name);
 }
 
 static void printUsage(int /* argc */, char ** argv) {
@@ -1199,9 +1501,30 @@ int main(int argc, char ** argv) {
                 llm->response(tokens, nullptr, nullptr, decodeTokens);
                 auto prefillTime = context->prefill_us;
                 auto decodeTime = context->decode_us;
+                auto decodeGenerated = context->gen_seq_len;
                 if (i > 0) { // Exclude the first performance value.
                     t.prefillUs.push_back(prefillTime);
                     t.decodeUs.push_back(decodeTime);
+                    t.decodeTokensActual.push_back(decodeGenerated);
+                    t.h2oKeep.push_back(context->h2o_keep_ratio);
+                    t.h2oLossy.push_back(context->h2o_lossy_ratio);
+                    t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oTargetKeepEffective.push_back(context->h2o_target_keep_effective);
+                    t.h2oFloorKeep.push_back(context->h2o_floor_keep_by_recent_sink);
+                    t.h2oQuantizedKeep.push_back(context->h2o_block_quantized_keep);
+                    t.h2oEvictUs.push_back((double)context->h2o_evict_us);
+                    t.h2oCodecUs.push_back((double)context->h2o_codec_us);
+                    t.h2oLosslessRawMB.push_back((double)context->h2o_lossless_raw_bytes / 1024.0 / 1024.0);
+                    t.h2oLosslessCompMB.push_back((double)context->h2o_lossless_compressed_bytes / 1024.0 / 1024.0);
+                    t.h2oLosslessCompUs.push_back((double)context->h2o_lossless_compress_us);
+                    t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
+                    t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
+                    t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessBackpressureSkip.push_back((double)context->h2o_lossless_backpressure_skip_count);
+                    t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
+                    t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
+                    t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);
+                    t.h2oLosslessDecodeCacheMiss.push_back((double)context->h2o_lossless_decode_cache_miss);
                 }
             }
             if (printHeader) {
@@ -1231,6 +1554,25 @@ int main(int argc, char ** argv) {
                 }
                 if (i > 0) {
                     t.samplesUs.push_back(sampler_us);
+                    t.h2oKeep.push_back(context->h2o_keep_ratio);
+                    t.h2oLossy.push_back(context->h2o_lossy_ratio);
+                    t.h2oLossless.push_back(context->h2o_lossless_ratio);
+                    t.h2oTargetKeepEffective.push_back(context->h2o_target_keep_effective);
+                    t.h2oFloorKeep.push_back(context->h2o_floor_keep_by_recent_sink);
+                    t.h2oQuantizedKeep.push_back(context->h2o_block_quantized_keep);
+                    t.h2oEvictUs.push_back((double)context->h2o_evict_us);
+                    t.h2oCodecUs.push_back((double)context->h2o_codec_us);
+                    t.h2oLosslessRawMB.push_back((double)context->h2o_lossless_raw_bytes / 1024.0 / 1024.0);
+                    t.h2oLosslessCompMB.push_back((double)context->h2o_lossless_compressed_bytes / 1024.0 / 1024.0);
+                    t.h2oLosslessCompUs.push_back((double)context->h2o_lossless_compress_us);
+                    t.h2oLosslessDecompUs.push_back((double)context->h2o_lossless_decompress_us);
+                    t.h2oLosslessQueuePeak.push_back((double)context->h2o_lossless_queue_depth_peak);
+                    t.h2oLosslessFallback.push_back((double)context->h2o_lossless_fallback_count);
+                    t.h2oLosslessBackpressureSkip.push_back((double)context->h2o_lossless_backpressure_skip_count);
+                    t.h2oLosslessAsyncQueuePeak.push_back((double)context->h2o_lossless_async_queue_peak);
+                    t.h2oLosslessAsyncWaitUs.push_back((double)context->h2o_lossless_async_wait_us);
+                    t.h2oLosslessDecodeCacheHit.push_back((double)context->h2o_lossless_decode_cache_hit);
+                    t.h2oLosslessDecodeCacheMiss.push_back((double)context->h2o_lossless_decode_cache_miss);
                 }
             }
 

@@ -1,0 +1,22 @@
+{
+  "prompts": [512],
+  "gens": [128],
+  "repeat": 3,
+  "h2o_keep_ratios": [0.35, 0.36, 0.40],
+  "h2o_block_tokens": [32],
+  "h2o_sink_tokens": [16],
+  "h2o_recent_tokens": [96],
+  "h2o_ema_alphas": [0.9],
+  "h2o_update_intervals": [16],
+  "h2o_trigger_min_tokens": [384],
+  "h2o_layer_start": 2,
+  "h2o_layer_end": -1,
+  "h2o_target_mode": "static",
+  "h2o_target_lossy_ratio": 3.0,
+  "h2o_log_stats": false,
+  "kv_lossless_enable": true,
+  "kv_lossless_codec": "gear_delta",
+  "kv_lossless_scope": "front_n",
+  "kv_lossless_front_n": 2,
+  "kv_lossless_runtime_mode": "probe"
+}

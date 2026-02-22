@@ -1,0 +1,261 @@
+You are a senior operations + product analyst. You will receive a mixed dossier (notes, logs, a table, and email snippets). Your job is to reason carefully, detect inconsistencies, and produce a structured decision.
+
+STRICT RULES:
+- Do not invent facts not supported by the dossier.
+- If information conflicts, explicitly flag the conflict and pick the most defensible interpretation.
+- Follow the output schema exactly (JSON), with double quotes and no trailing commas.
+
+DOSSIER (Case #01):
+
+1) Background (from kickoff doc)
+We run “Orchid”, a multi-tenant inference service. Customers send requests to /v1/generate.
+Key service objectives (SLOs):
+- Availability: 99.9% monthly.
+- Latency: p95 < 800 ms for requests under 2k tokens.
+- Cost: average GPU-seconds per request must not increase by more than 5% month-over-month.
+
+Known architecture:
+Client → Edge → Router → Model-Server → KVCache store → GPU workers → Response
+The Router uses a queue. If the queue depth is high, it sheds low-priority traffic.
+
+2) Change timeline (from change log)
+- Feb 10: Enabled “speculative decoding” for 10% of traffic (feature flag: SPEC_DEC).
+- Feb 12: Increased max_batch_size from 16 to 32 on GPU workers.
+- Feb 13: Introduced a new retry policy at Edge: up to 1 retry when upstream returns 503 (backoff 150 ms).
+- Feb 14: Rolled out new KVCache compression mode “MNN-lite” to 30% of traffic.
+- Feb 15: Config change: Router queue_shed_threshold reduced from 240 to 180.
+
+3) Metrics summary (daily)
+Day        Req/s   p50(ms) p95(ms) p99(ms)  5xx_rate  Shed_rate  GPU_util  KV_hit_rate
+Feb 09      120     220     620     900      0.3%     0.2%      61%       72%
+Feb 10      125     210     600     870      0.3%     0.2%      63%       71%
+Feb 11      130     205     610     910      0.4%     0.3%      66%       70%
+Feb 12      150     240     780     1250     0.6%     0.5%      75%       66%
+Feb 13      155     230     820     1400     0.9%     0.7%      77%       65%
+Feb 14      160     235     910     1700     1.2%     0.9%      81%       64%
+Feb 15      165     250     980     1900     1.5%     1.8%      79%       63%
+Feb 16      162     245     930     1750     1.3%     1.6%      78%       63%
+
+Notes:
+- “Shed_rate” is Router’s fraction of requests that were rejected due to queue depth.
+- “KV_hit_rate” is the fraction of tokens served from KVCache (higher is better for speed).
+
+4) Router logs (excerpt; timestamps local)
+[Feb 15 10:13:01] INFO queue_depth=176 priority=low decision=accept
+[Feb 15 10:13:02] WARN queue_depth=182 priority=low decision=shed reason=threshold
+[Feb 15 10:13:03] WARN queue_depth=181 priority=high decision=accept
+[Feb 15 10:13:04] WARN queue_depth=183 priority=high decision=accept
+[Feb 15 10:13:05] WARN queue_depth=195 priority=low decision=shed reason=threshold
+[Feb 15 10:13:06] INFO queue_depth=165 priority=low decision=accept
+
+5) Edge logs (excerpt)
+[Feb 13 09:02:10] upstream_status=503 request_id=ab91 retry=0 action=retry backoff_ms=150
+[Feb 13 09:02:11] upstream_status=200 request_id=ab91 retry=1 action=return
+[Feb 15 10:13:02] upstream_status=503 request_id=cd77 retry=0 action=retry backoff_ms=150
+[Feb 15 10:13:02] upstream_status=503 request_id=cd77 retry=1 action=return
+
+6) Email snippets
+Email A (from PM, Feb 16):
+“Customers are complaining about ‘random failures’. They say it got worse after the KVCache compression rollout. Can we roll it back today?”
+
+Email B (from infra engineer, Feb 16):
+“I suspect the Router’s new shed threshold is too aggressive. Also, I saw GPU utilization drop slightly on Feb 15 even though traffic rose.”
+
+Email C (from finance, Feb 16):
+“Reminder: cost is tight. Any fix that materially increases GPU-seconds/request needs justification and approval.”
+
+7) Constraints and goals (today)
+- You can do at most ONE of: rollback one change, or adjust one config, or ship one code patch.
+- You must propose a plan that improves p95 latency AND reduces customer-visible failures (5xx + shedding) within 24 hours.
+- You must not increase GPU utilization by more than 3 percentage points on average.
+
+REQUESTED OUTPUT (JSON only):
+{
+  "primary_root_cause": "...",
+  "supporting_evidence": [
+    {"evidence": "...", "source": "..."},
+    {"evidence": "...", "source": "..."},
+    {"evidence": "...", "source": "..."}
+  ],
+  "conflicts_or_uncertainties": [
+    "..."
+  ],
+  "one_change_today": {
+    "action": "...",
+    "expected_impact": {
+      "latency_p95": "...",
+      "failures": "...",
+      "gpu_utilization": "..."
+    },
+    "risk": "...",
+    "rollback_plan": "..."
+  },
+  "verification_plan": [
+    {"check": "...", "success_criteria": "..."},
+    {"check": "...", "success_criteria": "..."},
+    {"check": "...", "success_criteria": "..."}
+  ],
+  "pm_summary": "..."
+}
+
+Begin now. Remember: JSON only.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Assume you cannot run code and must reason from the text only.
+
+Assume you cannot run code and must reason from the text only.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+Keep your final answer concise and follow the requested output format exactly.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Assume you cannot run code and must reason from the text only.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+If you make an assumption, state it explicitly before using it.
+
+If you make an assumption, state it explicitly before using it.
+
+Keep your final answer concise and follow the requested output format exactly.
+
+If you make an assumption, state it explicitly before using it.
+
+Keep your final answer concise and follow the requested output format exactly.
+
+When extracting, do not infer fields that are not explicitly present.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+If you make an assumption, state it explicitly before using it.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+Do not repeat the prompt; produce only the deliverables.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Assume you cannot run code and must reason from the text only.
+
+When extracting, do not infer fields that are not explicitly present.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Do not repeat the prompt; produce only the deliverables.
+
+Assume you cannot run code and must reason from the text only.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+If you make an assumption, state it explicitly before using it.
+
+Assume you cannot run code and must reason from the text only.
+
+Prefer deterministic reasoning over speculation.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+Prefer deterministic reasoning over speculation.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Do not repeat the prompt; produce only the deliverables.
+
+Do not repeat the prompt; produce only the deliverables.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Do not repeat the prompt; produce only the deliverables.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+Prefer deterministic reasoning over speculation.
+
+Use units consistently and show intermediate calculations when asked.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+When extracting, do not infer fields that are not explicitly present.
+
+If you make an assumption, state it explicitly before using it.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+When summarizing, preserve all numbers and named entities exactly as written.
+
+When summarizing, preserve all numbers and named entities exactly as written.
+
+Assume you cannot run code and must reason from the text only.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Use units consistently and show intermediate calculations when asked.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+When summarizing, preserve all numbers and named entities exactly as written.
+
+Assume you cannot run code and must reason from the text only.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+Assume you cannot run code and must reason from the text only.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Keep your final answer concise and follow the requested output format exactly.
+
+If you make an assumption, state it explicitly before using it.
+
+Treat timestamps as local time unless a timezone is stated otherwise.
+
+Keep your final answer concise and follow the requested output format exactly.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+If multiple solutions exist, choose the one that best satisfies all constraints.
+
+When summarizing, preserve all numbers and named entities exactly as written.
+
+Use units consistently and show intermediate calculations when asked.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+Assume you cannot run code and must reason from the text only.
+
+Avoid unnecessary verbosity; precision is more important than length.
+
+If you make an assumption, state it explicitly before using it.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
+
+When extracting, do not infer fields that are not explicitly present.
+
+Prefer deterministic reasoning over speculation.
+
+Prefer deterministic reasoning over speculation.
+
+If you detect conflicting information, identify the conflict and explain how you resolved it.
