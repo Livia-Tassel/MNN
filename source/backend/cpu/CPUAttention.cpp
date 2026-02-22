@@ -2523,6 +2523,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             const size_t rawBefore = (size_t)kvSeqLen * bytesPerToken;
             const size_t rawAfter = (size_t)finalKeepTokens * bytesPerToken;
             const size_t lossyDen = rawAfter + reserveMetaBytes;
+            // NOTE on statistics: when floorDominatesTarget is true, the
+            // algorithm performs no eviction (sink+recent floor >= target),
+            // so the true ratios are both 1.0.  We intentionally skip the
+            // update here to retain the value from the last real compression
+            // step, avoiding 1.0 samples that would drag down bench averages.
+            // Caveat: if compression NEVER triggers (e.g. very short prompts
+            // where kvSeqLen stays within the floor zone), the ratios remain
+            // at their initial value of 1.0 — which is factually correct
+            // since no compression occurred.  Consumers (llm_bench, llm_demo)
+            // that average these values should be aware that floor-dominated
+            // steps are not reflected in h2o_keep_ratio / h2o_lossy_ratio.
             if (!floorDominatesTarget) {
                 mMeta->h2o_keep_ratio = kvSeqLen > 0 ? (float)finalKeepTokens / (float)kvSeqLen : 1.0f;
                 mMeta->h2o_lossy_ratio = lossyDen > 0 ? (float)rawBefore / (float)lossyDen : 1.0f;

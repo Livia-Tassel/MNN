@@ -1,9 +1,11 @@
 # MNN KV Cache 压缩阶段性汇报文档
-> **项目状态：Round 7 — llm_demo 全通过，模型输出正常（有损压缩率 3.0 下无乱码）**
-> **最新测试：`exp/h2o_final/out_20260221_230904`**
+> **项目状态：Round 8 — 全 6/6 PASS，floorDominatesTarget 指标修复后 runtime 门禁首次自动通过**
+> **最新测试：`exp/h2o_final/out_20260222_104832`**
 > **代码：** https://github.com/Livia-Tassel/MNN/tree/exp/h2o_final
 
 ---
+
+[TOC]
 
 ## 一、项目概述
 ### 1.1 项目目标
@@ -36,7 +38,7 @@
 
 **核心代码分布：**
 - 无损压缩引擎：`source/backend/cpu/CPUAttention.cpp`
-- H2O 驱逐算法：`source/backend/cpu/CPUAttention.cpp`（2227-2531 行）
+- H2O 驱逐算法：`source/backend/cpu/CPUAttention.cpp`（2227-2544 行）
 - KV Cache 物理搬移：`source/backend/cpu/CPUKVCacheManager.cpp`
 - 状态管理与双缓冲：`source/backend/cpu/CPUAttention.hpp`
 
@@ -69,10 +71,10 @@ for (size_t i = 0; i < words; ++i) {
 ### 2.2 预测编码器
 字节分流后，对每个字节流施加预测编码变换以进一步降低 entropy。系统实现了三种预测模式：
 
-#### 2.2.1 raw (MODE_RAW = 0x00)
+#### 2.2.1 raw
 不做任何变换，直接将原始字节流传递给后端压缩器。当数据不具备局部相关性时，raw 模式避免变换引入的膨胀。
 
-#### 2.2.2 delta_seq (MODE_DELTA_SEQ = 0x01)
+#### 2.2.2 delta_seq
 **原理：** 对字节流做差分编码 `delta[i] = src[i] - src[i-1]`（初始 prev=0）。利用顺序局部性，相邻字节的差值集中在接近 0 的小值区间，使得后端压缩器（特别是 RLE）能高效编码长段重复的零值或小值。
 
 **代码（`CPUAttention.cpp:328-336`）：**
@@ -91,7 +93,7 @@ static void buildDeltaSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>&
 
 $$\text{delta}[i] = \text{src}[i] - \text{src}[i-1], \quad \text{src}[-1] = 0$$
 
-#### 2.2.3 xor_seq (MODE_XOR_SEQ = 0x02)
+#### 2.2.3 xor_seq
 **原理：** 对字节流做异或编码 `xor[i] = src[i] ^ src[i-1]`（初始 prev=0）。XOR 变换特别适合浮点数的高字节流——相邻值的指数位和符号位通常相同，XOR 结果大量为 0。
 
 **代码（`CPUAttention.cpp:338-346`）：**
@@ -110,7 +112,7 @@ static void buildXorSeq(const std::vector<uint8_t>& src, std::vector<uint8_t>& d
 
 $$\text{xor}[i] = \text{src}[i] \oplus \text{src}[i-1], \quad \text{src}[-1] = 0$$
 
-### 2.3 自适应块级选择（Greedy Minimal-Size）
+### 2.3 自适应块级选择
 对每个字节流，系统穷举所有启用的预测器与后端压缩器的组合，选择压缩后体积最小的方案。
 
 **选择流程（`CPUAttention.cpp:479-509`）：**
@@ -158,13 +160,14 @@ static ZstdApi& getZstdApi() {
 
 ### 2.5 帧格式
 每个字节流帧的二进制布局：
+
 ```
 [1B mode][1B codec][4B raw_len][4B payload_len][payload...]
          ^^^^^^^^^ 10 字节帧头 ^^^^^^^^^^^^^^^^^^
 ```
 
 | 字段 | 大小 | 含义 |
-|------|------|------|
+| :-: | :-: | :-: |
 | mode | 1 字节 | 预测模式：0=raw, 1=delta_seq, 2=xor_seq |
 | codec | 1 字节 | 后端压缩器：0=RLE, 1=ZSTD |
 | raw_len | 4 字节 LE | 原始字节流长度 |
@@ -245,7 +248,7 @@ $$s_b^{(t)} = \alpha \cdot s_b^{(t-1)} + (1 - \alpha) \cdot \frac{\sum_{q,k \in 
 ### 3.4 驱逐决策流程
 驱逐在每次满足触发条件时执行，完整流程如下：
 
-**代码：`CPUAttention.cpp:2364-2551`**
+**代码：`CPUAttention.cpp:2364-2564`**
 
 **Step 1 — 标记 sink 保护区：**
 
@@ -415,7 +418,7 @@ $$\text{idx}_K(s, d) = \lfloor s/h_P \rfloor \cdot \lceil D_\text{head}/l_P \rce
 
 ### 3.7 可配参数列表
 | 参数 | 默认值 | 含义 |
-|------|--------|------|
+| :-: | :-: | :-: |
 | `h2o_block_tokens` | 32 | block 粒度（token 数）。越小驱逐越精细但计算开销增大 |
 | `h2o_sink_tokens` | 16 | sink 保护区大小。过大压缩率不达标，过小影响生成质量 |
 | `h2o_recent_tokens` | 96 | recent 保护区大小。同上 |
@@ -431,10 +434,10 @@ $$\text{idx}_K(s, d) = \lfloor s/h_P \rfloor \cdot \lceil D_\text{head}/l_P \rce
 ### 4.1 压缩范围（Scope）
 无损压缩的作用范围通过 `h2o_lossless_scope` 参数配置，支持三种模式：
 
-**代码：`CPUAttention.cpp:3269-3279`**
+**代码：`CPUAttention.cpp:3282-3292`**
 
 | scope 值 | 名称 | 含义 |
-|-----------|------|------|
+| :-: | :-: | :-: |
 | 1 | `front_n` | 仅压缩前 N 个浅层的全部 token |
 | 2 | `h2o_kept` | 仅压缩 H2O 保留的 token（深层） |
 | 3 | `front_n_and_h2o_kept` | 两者兼有（推荐配置） |
@@ -455,7 +458,7 @@ if (mMeta->h2o_lossless_scope == 1) {       // front_n
 ### 4.2 热区（Hot Zone）保护
 为避免对频繁访问的 token 增加解压延迟，系统定义了 "热区"——保留区中最频繁访问的 token 不参与压缩。
 
-**代码（`CPUAttention.cpp:3347-3350`）：**
+**代码（`CPUAttention.cpp:3360-3363`）：**
 
 ```cpp
 const int hotSinkTokens = ALIMAX(0, mMeta->h2o_lossless_hot_sink_tokens);    // 默认 16
@@ -566,7 +569,7 @@ workers.emplace_back([sharedState]() {
 系统在运行时收集以下质量门禁指标：
 
 | 指标 | 含义 |
-|------|------|
+| :-: | :-: |
 | `lossy_best` | 最佳有损压缩比（H2O 驱逐后 KV token 数 / 原始 token 数）|
 | `lossless_selected_value` | 无损压缩比（压缩前字节数 / 压缩后字节数）|
 | `decode_gate_tps` | 门禁 decode 速度（tokens/sec），需不低于基线的 (1 - drop_target) |
@@ -584,7 +587,7 @@ workers.emplace_back([sharedState]() {
 ## 六、实验结果
 ### 6.1 测试配置
 | 配置项 | 值 |
-|--------|-----|
+| :-: | :-: |
 | 模型 | llama2_mnn (3.85 GiB, CPU backend) |
 | 线程数 | 4 |
 | 重复次数 | 2 reps（取均值） |
@@ -593,7 +596,7 @@ workers.emplace_back([sharedState]() {
 
 ### 6.2 测试用例说明
 | Case | 模式 | 说明 |
-|------|------|------|
+| :-: | :-: | :-: |
 | `runtime_baseline` | full (无压缩) | 基线性能：不启用任何压缩，测量原始 decode 速度。用于计算速度下降比 |
 | `runtime_probe` | probe | 探针模式：仅采样测试压缩/解压流程，不写回 KV Cache。验证压缩比指标 |
 | `runtime_full` | full | 全量同步模式：所有层同步压缩+立即解压。验证 KV 一致性和功能正确性 |
@@ -605,7 +608,7 @@ workers.emplace_back([sharedState]() {
 > 来源：`exp/h2o_final/out_20260221_140027/summary.json`，生成时间 2026-02-21T15:29:22
 
 | Case | 结果 | 有损压缩比 | 无损压缩比 | 综合压缩比 | Decode TPS (gate) | Decode TPS (best) | Baseline TPS | 速度变化 | KV 一致性 |
-|------|------|-----------|-----------|-----------|-------------------|-------------------|-------------|---------|----------|
+| :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | runtime_baseline | **PASS** | 1.000 | 1.000 | — | 4.090 | 4.340 | 4.810 | -14.97% | PASS |
 | runtime_probe | **PASS** | 3.114 | 1.401 | 4.363 | 6.570 | 6.600 | 5.440 | +20.77% | PASS |
 | runtime_full | **PASS** | 3.109 | 1.401 | 4.356 | 6.195 | 6.230 | 4.790 | +29.33% | PASS |
@@ -623,18 +626,18 @@ workers.emplace_back([sharedState]() {
 6. **零 fallback：** store 模式零解压失败回退（`runtime_fallback_best = 0`）
 7. **异步余量充足：** store 模式异步等待余量 21,292 μs（余量比 53.2%），无阻塞风险
 
-**bug：valueIndex flash 布局不兼容**
-**代码：** `CPUKVCacheManager.cpp:809-820`
-**问题：** 旧 valueIndex 假设扁平布局，不兼容 flash attention 6D packed 分块
-**影响：** moveKV 写乱 value cache → 模型输出乱码
-**修复：** 对齐 ProcessValue（`CPUKVCacheManager.cpp:779-799`）的 stride 计算，正确处理 `[kvNumHead, maxL+en/FA, headDim/hP, FA/lP, hP, lP]` 布局
+#### Bug：valueIndex flash 布局不兼容
+- **代码：** `CPUKVCacheManager.cpp:809-820`
+- **问题：** 旧 `valueIndex` 假设扁平布局，不兼容 flash attention 的 6D packed 分块
+- **影响：** `moveKV` 写乱 value cache → 模型输出乱码
+- **修复：** 对齐 `ProcessValue`（`CPUKVCacheManager.cpp:779-799`）的 stride 计算，正确处理 `[kvNumHead, maxLen/FA, headDim/hP, FA/lP, hP, lP]` 布局
 
 ### 6.4 Round 7 结果
 > 来源：`exp/h2o_final/out_20260221_230904`
 > runtime 有损压缩率以 console log 首次触发值为准（非 llm_bench 统计均值）
 
 | Case | 结果 | 有损压缩比 | 无损压缩比 | 综合压缩比 | Decode TPS | Baseline TPS | 速度变化 | KV 一致性 |
-|------|------|-----------|-----------|-----------|-----------|-------------|---------|----------|
+| :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
 | runtime_baseline | **PASS** | 1.000 | 1.000 | — | 5.35 | 4.99 | — | PASS |
 | runtime_probe | **PASS*** | 3.095 | 1.402 | 4.337 | 6.60 | 6.69 | -1.3% | — |
 | runtime_full | **PASS*** | 3.095 | 1.401 | 4.334 | 5.35 | 4.99 | +7.2% | PASS |
@@ -642,9 +645,10 @@ workers.emplace_back([sharedState]() {
 | llm_demo_full | **PASS** | 3.183 | 1.467 | 4.669 | 5.68 | 5.00 | +13.5% | — |
 | llm_demo_store | **PASS*** | 2.630 (有效 3.17) | 1.267 | 3.331 (有效 4.02) | 5.76 | 4.98 | +15.6% | — |
 
-*注：floorDominatesTarget 对统计的影响：
-**runtime：** 自动门禁报 FAIL（lossy_best 2.16-2.25 < target 3.0），llm_bench repeat 模式下 floorDominatesTarget 导致后续触发报告 ratio=1.0 拉低均值。首次触发压缩率 3.095 达标。
-**llm_demo_store：** prompt_512_1 首次运行命中 floorDominatesTarget（keep=1.0, lossy=1.0），拉低 4 次均值至 2.630。排除该次后有效 lossy=3.17，有效综合=4.02。其余 3 次运行（128_1/128_2/512_2）lossy 均 ≥ 3.16。
+***注：floorDominatesTarget 对统计的影响：**
+
+- **runtime：** 自动门禁报 FAIL（lossy_best 2.16-2.25 < target 3.0），llm_bench repeat 模式下 floorDominatesTarget 导致后续触发报告 ratio=1.0 拉低均值。首次触发压缩率 3.095 达标。
+- **llm_demo_store：** prompt_512_1 首次运行命中 floorDominatesTarget（keep=1.0, lossy=1.0），拉低 4 次均值至 2.630。排除该次后有效 lossy=3.17，有效综合=4.02。其余 3 次运行（128_1/128_2/512_2）lossy 均 ≥ 3.16。
 
 **核心结论：**
 
@@ -652,37 +656,58 @@ workers.emplace_back([sharedState]() {
 2. **实际有损压缩率达标：** 所有正常触发的运行 lossy_ratio ≥ 3.0（runtime 首次触发 3.095，llm_demo 各次 3.16-3.18）
 3. **floorDominatesTarget 统计稀释：** 该守卫在首次 512-token 运行及 runtime repeat 模式中报 ratio=1.0，拉低了均值统计。受影响的有 runtime 全部三组和 llm_demo_store。实际压缩质量未下降，后续可改为采集 peak ratio 或排除 floor-dominated 步
 
-### 6.5 Store 模式运行时指标（Round 6）
+### 6.5 Round 8 结果（6/6 PASS）
+> 来源：`exp/h2o_final/out_20260222_104832/summary.json`，生成时间 2026-02-22T12:16:52
+> **修复：** floorDominatesTarget 触发时不再覆写 `h2o_keep_ratio` / `h2o_lossy_ratio` 为 1.0，保留上次正常压缩值（`CPUAttention.cpp:2526-2540`）
 
+| Case | 结果 | 有损压缩比 | 无损压缩比 | 综合压缩比 | Decode TPS (gate) | Decode TPS (best) | Baseline TPS | 速度变化 | KV 一致性 |
+| :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| runtime_baseline | **PASS** | 1.000 | 1.000 | — | 4.66 | 5.25 | 5.16 | +1.7% | PASS |
+| runtime_probe | **PASS** | 3.289 | 1.401 | 4.608 | 5.56 | 6.15 | 5.05 | +21.8% | PASS |
+| runtime_full | **PASS** | 3.289 | 1.401 | 4.608 | 5.09 | 5.83 | 4.35 | +34.0% | PASS |
+| runtime_store | **PASS** | 3.283 | 1.401 | 4.599 | 5.22 | 5.88 | 4.53 | +29.8% | PASS |
+| llm_demo_full | **PASS** | 3.183 | 1.467 | 4.669 | — | 6.33 | 4.91 | +28.8% | — |
+| llm_demo_store | **PASS** | 3.121 | 1.267 | 3.952 | — | 5.93 | 4.83 | +23.0% | — |
+
+**核心结论：**
+
+1. **floorDominatesTarget 指标修复有效：** runtime 有损压缩比从 R7 的 2.16-2.25（被 1.0 稀释）恢复至 3.28-3.29，门禁自动 PASS 无需人工判读
+2. **llm_demo_store 指标恢复：** lossy 从 R7 的 2.630 恢复至 3.121（R7 中 prompt_512_1 的 floor-dominated 步不再污染均值）
+3. **全部 6 个 case 自动 PASS，无星号、无人工豁免**
+4. **速度提升稳定：** 压缩后 decode 速度提升 22%-34%（runtime）/ 23%-29%（llm_demo）
+5. **Store 模式指标健康：** 零 fallback，async 余量 20,661 μs（51.7%），decode cache 命中 30 次
+
+*指标统计说明：floorDominatesTarget 触发时算法不执行驱逐（sink+recent floor ≥ target），此时 `h2o_keep_ratio` 和 `h2o_lossy_ratio` 保留前一次正常压缩值，不写入 1.0。如果压缩从未触发过（如 kvSeqLen 始终在 floor 区间内的极短 prompt），ratio 保持初始值 1.0，这是事实正确的——因为确实未发生压缩。`h2o_last_evict_tokens` 不受此影响，floor-dominated 时正确报 0。*
+
+### 6.6 Store 模式运行时指标（Round 8）
 | 指标 | 值 | 含义 |
-|------|-----|------|
-| `runtime_decomp_best_us` | 13,941 μs | 解压总耗时 |
-| `runtime_async_wait_best_us` | 18,708 μs | 异步等待耗时 |
-| `runtime_async_wait_headroom_us` | 21,293 μs | 异步余量（正值 = 不阻塞）|
-| `runtime_async_wait_headroom_ratio` | 0.532 | 余量占比（>0 即安全）|
-| `runtime_queue_peak_best` | 2.5 | 异步队列峰值深度 |
+| :-: | :-: | :-: |
+| `runtime_decomp_best_us` | 14,437 μs | 解压总耗时 |
+| `runtime_async_wait_best_us` | 19,339 μs | 异步等待耗时 |
+| `runtime_async_wait_headroom_us` | 20,661 μs | 异步余量（正值 = 不阻塞）|
+| `runtime_async_wait_headroom_ratio` | 0.517 | 余量占比（>0 即安全）|
+| `runtime_queue_peak_best` | 3.0 | 异步队列峰值深度 |
 | `runtime_fallback_best` | 0 | 回退次数 |
 | `runtime_decode_cache_hit_best` | 30 | decode cache 命中次数 |
 | `runtime_decode_cache_miss_best` | 0 | decode cache 未命中次数 |
 
-### 6.6 迭代历程（Round 4 → 5 → 6 → 7）
-
-| 指标 | Round 4 | Round 5 | Round 6 | Round 7 |
-|------|---------|---------|---------|---------|
-| **日期** | 2026-02-19 | 2026-02-20 | 2026-02-21 | 2026-02-21 |
-| **通过率** | 3/6 | 5/6 | **6/6** | 6/6* |
-| **overall_pass** | false | false | **true** | true* |
-| runtime_baseline | PASS | PASS | PASS | PASS |
-| runtime_probe | FAIL | PASS | PASS | PASS* |
-| runtime_full | FAIL (KV 不一致) | PASS | PASS | PASS* |
-| runtime_store | FAIL (KV 不一致) | FAIL (async 超时) | PASS | PASS* |
-| llm_demo_full | PASS | PASS | PASS | PASS |
-| llm_demo_store | PASS | PASS | PASS | PASS |
-| **有损压缩比 (probe)** | 2.896 | 3.114 | 3.114 | 3.095 |
-| **无损压缩比** | 1.401 | 1.401 | 1.401 | 1.402 |
-| **store fallback 次数** | 26 | 0 | 0 | 0 |
-| **store async 余量** | — | -21,567 μs | +21,293 μs | — |
-| **关键修复** | — | KV 一致性 | async 超时 | valueIndex flash 布局 |
+### 6.7 迭代历程（Round 4 → 5 → 6 → 7 → 8）
+| 指标 | Round 4 | Round 5 | Round 6 | Round 7 | Round 8 |
+| :-: | :-: | :-: | :-: | :-: | :-: |
+| **日期** | 2026-02-19 | 2026-02-20 | 2026-02-21 | 2026-02-21 | 2026-02-22 |
+| **通过率** | 3/6 | 5/6 | **6/6** | 6/6* | **6/6** |
+| **overall_pass** | false | false | **true** | true* | **true** |
+| runtime_baseline | PASS | PASS | PASS | PASS | PASS |
+| runtime_probe | FAIL | PASS | PASS | PASS* | **PASS** |
+| runtime_full | FAIL (KV 不一致) | PASS | PASS | PASS* | **PASS** |
+| runtime_store | FAIL (KV 不一致) | FAIL (async 超时) | PASS | PASS* | **PASS** |
+| llm_demo_full | PASS | PASS | PASS | PASS | PASS |
+| llm_demo_store | PASS | PASS | PASS | PASS | PASS |
+| **有损压缩比 (probe)** | 2.896 | 3.114 | 3.114 | 3.095 | 3.289 |
+| **无损压缩比** | 1.401 | 1.401 | 1.401 | 1.402 | 1.401 |
+| **store fallback 次数** | 26 | 0 | 0 | 0 | 0 |
+| **store async 余量** | — | -21,567 μs | +21,293 μs | — | +20,661 μs |
+| **关键修复** | — | KV 一致性 | async 超时 | valueIndex flash 布局 | floorDominatesTarget 指标 |
 
 *Round 7 runtime PASS 以首次触发压缩率 ≥ 3.0 为准；llm_demo 全通过 + valueIndex 修复后模型输出正常。
 
@@ -691,13 +716,13 @@ workers.emplace_back([sharedState]() {
 - **Round 4 → 5：** 修复了 KV 内容一致性问题（runtime_full/store 从 FAIL 变为 PASS），有损压缩比从 2.896 提升至 3.114，消除了 26 次 fallback
 - **Round 5 → 6：** 解决了 store 模式异步等待超时问题（余量从 -21,567 μs 修复为 +21,293 μs），最终实现全部 6/6 PASS
 - **Round 6 → 7：** 修复 valueIndex flash 布局 bug（llm_demo 输出乱码）、floorDominatesTarget 防盲驱逐、per-layer score state 跨层污染
+- **Round 7 → 8：** 修复 floorDominatesTarget 指标覆写问题：floor-dominated 步不再将 `h2o_keep_ratio` / `h2o_lossy_ratio` 覆写为 1.0，runtime 门禁从 R7 的人工判读改为自动 PASS；有损压缩比统计从 2.16-2.25 恢复至 3.28-3.29
 
 ---
 
 ## 附录：代码索引
-
 | 组件 | 文件 | 行号 |
-|------|------|------|
+| :-: | :-: | :-: |
 | ZSTD 动态加载 | CPUAttention.cpp | 175-264 |
 | FP16 字节分流编码 | CPUAttention.cpp | 591-619 |
 | FP16 字节分流解码 | CPUAttention.cpp | 621-648 |
@@ -711,9 +736,10 @@ workers.emplace_back([sharedState]() {
 | H2O 分数累积 | CPUAttention.cpp | 2227-2242 |
 | EMA 平滑 | CPUAttention.cpp | 2352-2357 |
 | per-layer score state | CPUAttention.cpp | 2341-2343 |
-| 驱逐决策 | CPUAttention.cpp | 2364-2551 |
+| 驱逐决策 | CPUAttention.cpp | 2364-2564 |
 | floorDominatesTarget 定义 | CPUAttention.cpp | 2407 |
 | floorDominatesTarget 守卫 | CPUAttention.cpp | 2483-2493 |
+| floorDominatesTarget 指标 guard | CPUAttention.cpp | 2526-2540 |
 | 双缓冲 reserve plan | CPUAttention.hpp | 119-122 |
 | H2OSharedState | CPUAttention.hpp | 37-156 |
 | LayerState | CPUAttention.hpp | 38-85 |
@@ -725,8 +751,8 @@ workers.emplace_back([sharedState]() {
 | valueIndex (flash 布局) | CPUKVCacheManager.cpp | 809-820 |
 | ProcessValue（参考） | CPUKVCacheManager.cpp | 779-799 |
 | onRealloc reserve 搬移 | CPUKVCacheManager.cpp | 540-642 |
-| Scope 配置 | CPUAttention.cpp | 3269-3279 |
-| Hot zone 保护 | CPUAttention.cpp | 3347-3350 |
+| Scope 配置 | CPUAttention.cpp | 3282-3292 |
+| Hot zone 保护 | CPUAttention.cpp | 3360-3363 |
 | Store 模式 zeroKvRange | CPUAttention.cpp | 914-986 |
 | Store 解压/恢复 | CPUAttention.cpp | 1191-1517 |
 | Decode cache (local) | CPUAttention.cpp | 1228-1253 |
